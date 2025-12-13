@@ -1,0 +1,84 @@
+{
+  "asof": "2025-12-11",
+  "id": {
+    "symbol": "ADBE",
+    "country": "US",
+    "currency": "USD",
+    "sector": "Unknown",
+    "industry": "Unknown"
+  },
+  "momentum": {
+    "mom_1m": 0.051647560170457796,
+    "mom_3m": 0.00306274330203804,
+    "mom_6m": -0.15289595822858248,
+    "mom_12m": -0.360447502418192
+  },
+  "trend": {
+    "ma50": 336.55359999999985,
+    "price_above_ma50": true,
+    "ma200": 367.63002500000033,
+    "price_above_ma200": false,
+    "golden_cross_recent": false,
+    "death_cross_recent": false,
+    "higher_highs_lows": "downtrend",
+    "macd_line": 2.3613182980327565,
+    "macd_signal": -1.4262755542565735,
+    "macd_histogram": 3.78759385228933,
+    "macd_bull_cross": false,
+    "macd_bear_cross": false,
+    "rsi_14d": 63.36159115750358,
+    "rsi_overbought": false,
+    "rsi_oversold": false,
+    "adx_14d": 25.688220274614224
+  },
+  "volatility": {
+    "realized_vol_21d": 0.2987956508236074,
+    "realized_vol_63d": 0.2877461512535381,
+    "realized_vol_252d": 0.3440490929797082,
+    "vol_ratio_21v252": 0.8684680672628023,
+    "atr_14d": 9.798039259911834,
+    "atr_14d_pct": 0.02796004697061277,
+    "vol_regime": "neutral"
+  },
+  "risk": {
+    "beta_1y": 0.8813399723413796,
+    "corr_sp500": 0.5003840594747175,
+    "r2_sp500": 0.2503842069763977,
+    "sharpe_1y": -1.2991941523685182,
+    "sortino_1y": -1.3470439178563838,
+    "max_drawdown_1y": 0.4644880681971973,
+    "up_capture_1y": 0.6682364320287386,
+    "down_capture_1y": 1.2837703977346202
+  },
+  "volume_liquidity": {
+    "avg_vol_3m": 4196775.476190476,
+    "avg_dollar_vol_21d": 1409549600.597619,
+    "vol_last": 10158661.0,
+    "volume_spike_z": 3.1153853599323766,
+    "obv_trend_21d": "flat",
+    "acc_dist_trend_21d": "flat",
+    "roll_spread_21": 0.0206193154623302,
+    "cs_spread_21": 0.0,
+    "liquidity_score_0_100": 75
+  },
+  "events": {
+    "gap_up": false,
+    "gap_down": false,
+    "gap_size_pct": -0.004327805787893841,
+    "new_52w_high": false,
+    "new_52w_low": false,
+    "pct_from_52w_high": -0.36611616590995427,
+    "pct_from_52w_low": 0.1246690309225413,
+    "higher_highs": true,
+    "higher_lows": true,
+    "prior_swing_break_up": true,
+    "prior_swing_break_down": false
+  },
+  "relative_perf": {
+    "vs_sp500_3m": -0.04814028739989418,
+    "vs_sp500_6m": -0.3009197056494053,
+    "vs_sp500_12m": -0.5139743680909029,
+    "rel_strength_trend": "rising",
+    "rel_strength_sector_3m": null
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "JNJ": {
+    "score": 0.7,
+    "confidence": 0.75,
+    "tone": "bullish",
+    "summary": "JNJ exhibits strong momentum with 1-month and 3-month returns of 9.0% and 18.7%, respectively, supported by an uptrend in price action and volume confirmation. However, the MACD histogram is negative and RSI is overbought, indicating potential near-term consolidation risk within the broader bullish structure."
+  },
+  "ADBE": {
+    "score": 0.15,
+    "confidence": 0.55,
+    "tone": "bullish",
+    "summary": "ADBE shows positive short-term momentum with a 5.2% 1-month return and bullish MACD histogram, but lacks volume confirmation and faces resistance from the 200-day moving average. The stock is in a neutral volatility regime with mixed longer-term signals, supporting a modest bullish outlook for the 1-week horizon."
+  },
+  "CSX": {
+    "score": 0.6,
+    "confidence": 0.65,
+    "tone": "bullish",
+    "summary": "CSX shows strong positive momentum with 1-month and 3-month returns above 6%, supported by bullish trend indicators including price above both MA50 and MA200, positive MACD histogram, and new 52-week highs. However, RSI is overbought at 70.39 and ADX is below 25, indicating weaker trend strength, while volume confirmation is mixed with OBV up but accumulation-distribution flat."
+  },
+  "NKE": {
+    "score": 0.0,
+    "confidence": 0.4,
+    "tone": "neutral",
+    "summary": "Mixed technical signals with conflicting momentum and trend indicators in a high volatility regime. Short-term positive momentum is offset by medium-term weakness and lack of strong trend confirmation."
+  }
+}

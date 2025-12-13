@@ -1,0 +1,82 @@
+{
+  "JNJ": {
+    "signal_final": 0.7,
+    "confidence_final": 0.85,
+    "decision": "LONG",
+    "decision_strength": "strong",
+    "components": {
+      "signal_llm": 0.7,
+      "confidence_llm": 0.75,
+      "signal_deterministic": 0.6679136543984674,
+      "confidence_deterministic": 0.8837697790394636,
+      "divergence_penalty": 0.0,
+      "volatility_penalty": 0.0,
+      "base_signal": 0.7
+    },
+    "agreement": "aligned",
+    "agreement_score": 1.0,
+    "regime": "uptrend_neutral_vol",
+    "interpretation": "Decision: LONG | Signal: very strong (+0.700) | Confidence: high confidence (0.850) | Agreement: aligned | Regime: uptrend_neutral_vol",
+    "symbol": "JNJ"
+  },
+  "ADBE": {
+    "signal_final": 0.12,
+    "confidence_final": 0.385,
+    "decision": "NEUTRAL",
+    "decision_strength": "neutral_zone",
+    "components": {
+      "signal_llm": 0.15,
+      "confidence_llm": 0.55,
+      "signal_deterministic": -0.14045515566317418,
+      "confidence_deterministic": 0.401159304482111,
+      "divergence_penalty": 0.2,
+      "volatility_penalty": 0.0,
+      "base_signal": 0.12
+    },
+    "agreement": "divergent",
+    "agreement_score": 0.4273862110842065,
+    "regime": "choppy_neutral_vol",
+    "interpretation": "Decision: NEUTRAL | Signal: weak (+0.120) | Confidence: low confidence (0.385) | Agreement: divergent | Regime: choppy_neutral_vol",
+    "symbol": "ADBE"
+  },
+  "CSX": {
+    "signal_final": 0.6,
+    "confidence_final": 0.75,
+    "decision": "LONG",
+    "decision_strength": "moderate",
+    "components": {
+      "signal_llm": 0.6,
+      "confidence_llm": 0.65,
+      "signal_deterministic": 0.3365742521169929,
+      "confidence_deterministic": 0.6743009882409475,
+      "divergence_penalty": 0.0,
+      "volatility_penalty": 0.0,
+      "base_signal": 0.6
+    },
+    "agreement": "aligned",
+    "agreement_score": 1.0,
+    "regime": "uptrend_neutral_vol",
+    "interpretation": "Decision: LONG | Signal: strong (+0.600) | Confidence: good confidence (0.750) | Agreement: aligned | Regime: uptrend_neutral_vol",
+    "symbol": "CSX"
+  },
+  "NKE": {
+    "signal_final": 0.0,
+    "confidence_final": 0.27999999999999997,
+    "decision": "NEUTRAL",
+    "decision_strength": "low_confidence",
+    "components": {
+      "signal_llm": 0.0,
+      "confidence_llm": 0.4,
+      "signal_deterministic": 0.0823870821435164,
+      "confidence_deterministic": 0.3458354787502308,
+      "divergence_penalty": 0.0,
+      "volatility_penalty": 0.15,
+      "base_signal": 0.0
+    },
+    "agreement": "divergent",
+    "agreement_score": 0.4794032294641209,
+    "regime": "choppy_high_vol",
+    "interpretation": "Decision: NEUTRAL | Signal: weak (+0.000) | Confidence: low confidence (0.280) | Agreement: divergent | Regime: choppy_high_vol",
+    "symbol": "NKE"
+  }
+}

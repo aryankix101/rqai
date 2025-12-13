@@ -1,0 +1,82 @@
+{
+  "JNJ": {
+    "tier1_score": 0.6679136543984674,
+    "weights_used": {
+      "momentum": 0.35,
+      "trend": 0.25,
+      "relative_strength": 0.2,
+      "volume": 0.15,
+      "risk": 0.05
+    },
+    "weighted_contributions": {
+      "momentum": 0.22544632261748634,
+      "trend": 0.19901840699306983,
+      "relative_strength": 0.0934489247879112,
+      "volume": 0.15,
+      "risk_adjustment": 0.0
+    },
+    "regime": "uptrend_neutral_vol",
+    "interpretation": "STRONG BULLISH (high confidence, uptrend_neutral_vol)",
+    "confidence": 0.8837697790394636
+  },
+  "ADBE": {
+    "tier1_score": -0.14045515566317418,
+    "weights_used": {
+      "momentum": 0.25,
+      "trend": 0.25,
+      "relative_strength": 0.25,
+      "volume": 0.15,
+      "risk": 0.1
+    },
+    "weighted_contributions": {
+      "momentum": 0.03560934339012562,
+      "trend": -0.09954185356413013,
+      "relative_strength": -0.14258767962493385,
+      "volume": -0.011999999999999993,
+      "risk_adjustment": 0.07806503413576416
+    },
+    "regime": "choppy_neutral_vol",
+    "interpretation": "NEUTRAL (moderate confidence, choppy_neutral_vol)",
+    "confidence": 0.401159304482111
+  },
+  "CSX": {
+    "tier1_score": 0.3365742521169929,
+    "weights_used": {
+      "momentum": 0.35,
+      "trend": 0.25,
+      "relative_strength": 0.2,
+      "volume": 0.15,
+      "risk": 0.05
+    },
+    "weighted_contributions": {
+      "momentum": 0.15571136472546135,
+      "trend": 0.08153832051907597,
+      "relative_strength": 0.08736593606000359,
+      "volume": 0.06600000000000002,
+      "risk_adjustment": -0.05404136918754804
+    },
+    "regime": "uptrend_neutral_vol",
+    "interpretation": "MODERATE BULLISH (good confidence, uptrend_neutral_vol)",
+    "confidence": 0.6743009882409475
+  },
+  "NKE": {
+    "tier1_score": 0.0823870821435164,
+    "weights_used": {
+      "momentum": 0.2,
+      "trend": 0.2,
+      "relative_strength": 0.2,
+      "volume": 0.15,
+      "risk": 0.25
+    },
+    "weighted_contributions": {
+      "momentum": 0.024119863990329945,
+      "trend": 0.058061092702583354,
+      "relative_strength": -0.10621855870728054,
+      "volume": 0.13800000000000004,
+      "risk_adjustment": -0.0315753158421164
+    },
+    "regime": "choppy_high_vol",
+    "interpretation": "NEUTRAL (low confidence, choppy_high_vol)",
+    "confidence": 0.3458354787502308
+  }
+}

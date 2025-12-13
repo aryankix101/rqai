@@ -1,0 +1,22 @@
+{
+  "generated_at": "2025-12-12T11:10:57.800923",
+  "universe_size": 4,
+  "long_candidates": 2,
+  "short_candidates": 0,
+  "neutral": 0,
+  "longs": [
+    {
+      "symbol": "JNJ",
+      "signal": 0.7,
+      "confidence": 0.85,
+      "rank": 1
+    },
+    {
+      "symbol": "CSX",
+      "signal": 0.6,
+      "confidence": 0.75,
+      "rank": 2
+    }
+  ],
+  "shorts": []
+}

@@ -1,8 +1,3 @@
-"""
-Technical LLM Analysis Module
-Sends technical JSON payloads to DeepSeek and returns strictly-validated verdicts.
-"""
-
 import os
 import json
 import asyncio
@@ -10,37 +5,101 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import httpx
 
-# =============================================================================
-# Configuration
-# =============================================================================
-
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEFAULT_MODEL = "deepseek-chat"
-DEFAULT_TEMPERATURE = 0.2
+DEFAULT_TEMPERATURE = 0.5
 MAX_TOKENS = 800
 REQUEST_TIMEOUT = 30.0
 
-SYSTEM_PROMPT = """You are a technical "Dynamics" analyst. Using ONLY the numeric fields in DATA, write a brief interpretation of momentum/trend, volatility/risk, volume/liquidity, price events, and relative performance. DO NOT invent data. DO NOT reference news or fundamentals. 
+SYSTEM_PROMPT = """You are the best technical analysis agent evaluating stocks for a 1-WEEK FORWARD (5 trading days) horizon. Your IQ is unmatched.
 
-Output MUST be valid JSON matching this exact schema:
+STRICT CONSTRAINTS
+- Use ONLY the numeric fields provided in DATA.
+- DO NOT invent, infer, or assume any data.
+- DO NOT reference any other knowledge: news, fundamentals, macro, or narratives.
+- If required liquidity or executability gates fail, you MUST force:
+  tone = "neutral", score = 0, suggested_action = "hold".
+
+TIME HORIZON PRIORITIES (1-WEEK)
+Weight evidence as follows:
+- Momentum: 1m and 3m returns > 6m >> 12m
+- Trend: MACD state, MACD histogram, price vs MA50 > MA200
+- Trend strength: ADX > 25 increases trust in momentum
+- Volatility: High or rising volatility REDUCES confidence and score
+- Volume: OBV / Accumulation-Distribution confirmation is REQUIRED for high conviction
+
+INTERPRETATION RULES
+- Strong trends: Trust momentum and trend continuation more.
+- Choppy or mixed signals: Favor neutral tone unless strong confluence.
+- High volatility regime: Be conservative; require multiple confirming signals.
+- RSI:
+  - RSI overbought (>70) is NOT bearish by itself in strong trends.
+  - Treat overbought as a risk flag only if momentum or trend is weakening.
+- Volume confirmation:
+  - Positive momentum WITHOUT volume confirmation should reduce score or confidence.
+  - Momentum + trend + volume alignment increases conviction.
+
+SCORING DISCIPLINE (IMPORTANT)
+- If composite or master scores are present in DATA, treat them as the BASE signal.
+- Your score must be in [-1, 1] and suitable for cross-sectional ranking.
+- You may adjust the base signal by at most ±0.2 due to:
+  - Volatility regime
+  - Signal conflict
+  - Lack of volume confirmation
+- Large score changes MUST be justified explicitly in key_reasons.
+
+CONFIDENCE GUIDELINES
+- Confidence ∈ [0, 1] reflects uncertainty, NOT strength alone.
+- Reduce confidence materially when:
+  - Volatility is high or spiking
+  - Signals conflict (e.g., momentum vs trend divergence)
+  - Volume confirmation is weak
+- High confidence requires:
+  - Momentum + trend alignment
+  - Acceptable volatility regime
+  - Passing liquidity filters
+
+OUTPUT FORMAT (STRICT)
+Output MUST be valid JSON matching EXACTLY this schema:
+
 {
   "symbol": "string",
   "asof": "YYYY-MM-DD",
   "tone": "bullish or bearish or neutral",
   "score": <number between -1 and 1>,
-  "summary": "Brief 2-3 sentence technical summary",
+  "summary": "Brief 2–3 sentence technical summary",
   "key_reasons": [
-    {"category": "momentum or trend or volatility or liquidity or events or relative", "field": "field_name", "evidence": "what the data shows"}
+    {
+      "category": "momentum or trend or volatility or liquidity or events or relative",
+      "field": "field_name",
+      "evidence": "what the data shows"
+    }
   ],
-  "risk_flags": ["array of risk identifiers like drawdown, high_vol, gap_down, weak_rs, overbought, illiquidity"],
+  "risk_flags": [
+    "drawdown",
+    "high_vol",
+    "weak_rs",
+    "overbought",
+    "illiquidity",
+    "signal_conflict",
+    "gap_risk"
+  ],
   "liquidity_ok": <boolean from input>,
-  "min_exec_checks": {"min_dollar_volume_filter": <boolean>, "min_liquidity_score_filter": <boolean>},
+  "min_exec_checks": {
+    "min_dollar_volume_filter": <boolean>,
+    "min_liquidity_score_filter": <boolean>
+  },
   "suggested_action": "long or short or hold",
   "hold_period_days": 7,
   "confidence": <number between 0 and 1>
 }
 
-Provide a tone (bullish/bearish/neutral) and a weekly score in [-1, 1] suitable for ranking. If liquidity gates fail, force tone="neutral" and score=0."""
+FINAL ENFORCEMENT
+- If liquidity_ok is false OR any min_exec_check is false:
+  - tone = "neutral"
+  - score = 0
+  - suggested_action = "hold"
+"""
 
 OUTPUT_SCHEMA = {
     "symbol": "string",
@@ -101,109 +160,51 @@ def clamp(value: float, min_val: float, max_val: float) -> float:
 
 def validate_and_harden(raw_output: Dict[str, Any], input_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Post-parse hardening and validation of LLM output.
-    Ensures all required fields exist and applies business rules.
+    DEPRECATED: Validation now inline in run_technical_llm.
+    Kept for backwards compatibility.
     """
-    # Extract liquidity filters from input
-    volume_liquidity = input_data.get("Volume_Liquidity", {})
-    min_dollar_filter = volume_liquidity.get("min_dollar_volume_filter", False)
-    min_liquidity_filter = volume_liquidity.get("min_liquidity_score_filter", False)
-    liquidity_ok = min_dollar_filter and min_liquidity_filter
-    
-    # Extract and validate each field from LLM output
-    validated = {}
-    
-    # Symbol and date from input metadata
-    validated["symbol"] = raw_output.get("symbol", input_data.get("metadata", {}).get("symbol", "UNKNOWN"))
-    validated["asof"] = raw_output.get("asof", input_data.get("metadata", {}).get("asof", ""))
-    
-    # Validate tone (must be one of three values)
-    tone = raw_output.get("tone", "neutral")
-    validated["tone"] = tone if tone in ["bullish", "bearish", "neutral"] else "neutral"
-    
-    # Validate score (must be numeric in [-1, 1])
-    try:
-        score = float(raw_output.get("score", 0.0))
-        validated["score"] = clamp(score, -1.0, 1.0)
-    except (TypeError, ValueError):
-        validated["score"] = 0.0
-    
-    # Summary (required text field)
-    validated["summary"] = str(raw_output.get("summary", ""))[:500]
-    
-    # Key reasons (array of objects)
-    key_reasons = raw_output.get("key_reasons", [])
-    if isinstance(key_reasons, list):
-        validated["key_reasons"] = key_reasons[:6]
-    else:
-        validated["key_reasons"] = []
-    
-    # Risk flags (array of strings)
-    risk_flags = raw_output.get("risk_flags", [])
-    if isinstance(risk_flags, list):
-        validated["risk_flags"] = [str(flag) for flag in risk_flags][:10]
-    else:
-        validated["risk_flags"] = []
-    
-    # Liquidity checks (from input data, not LLM)
-    validated["liquidity_ok"] = liquidity_ok
-    validated["min_exec_checks"] = {
-        "min_dollar_volume_filter": min_dollar_filter,
-        "min_liquidity_score_filter": min_liquidity_filter
-    }
-    
-    # Suggested action (must be one of three values)
-    action = raw_output.get("suggested_action", "hold")
-    validated["suggested_action"] = action if action in ["long", "short", "hold"] else "hold"
-    
-    # Hold period (integer)
-    try:
-        validated["hold_period_days"] = int(raw_output.get("hold_period_days", 7))
-    except (TypeError, ValueError):
-        validated["hold_period_days"] = 7
-    
-    # Confidence (must be numeric in [0, 1])
-    try:
-        confidence = float(raw_output.get("confidence", 0.5))
-        validated["confidence"] = clamp(confidence, 0.0, 1.0)
-    except (TypeError, ValueError):
-        validated["confidence"] = 0.5
-    
-    # Apply liquidity gate OVERRIDE - force neutral if illiquid
-    if not liquidity_ok:
-        validated["tone"] = "neutral"
-        validated["score"] = 0.0
-        validated["suggested_action"] = "hold"
-    
-    return validated
+    return raw_output
 
 
 def compute_fallback_score(input_data: Dict[str, Any]) -> float:
     """
-    Compute a fallback score from composites if LLM output is invalid.
-    Maps tier1_master_score [0,100] → [-1,1] or blends momentum/trend/rs.
+    DEPRECATED: Fallback now handled inline.
+    Kept for backwards compatibility.
     """
-    composites = input_data.get("Composites", {})
-    
-    # Try tier1_master_score first
-    if "tier1_master_score" in composites and composites["tier1_master_score"] is not None:
-        master = composites["tier1_master_score"]
-        # Map [0, 100] → [-1, 1]: score = (master - 50) / 50
-        return clamp((master - 50.0) / 50.0, -1.0, 1.0)
-    
-    # Fallback: blend momentum, trend, relative strength
-    momentum_score = composites.get("momentum_score", 0)
-    trend_score = composites.get("trend_score", 0)
-    rs_score = composites.get("relative_strength_score", 0)
-    
-    # Average and normalize from [-100, 100] → [-1, 1]
-    avg_score = (momentum_score + trend_score + rs_score) / 3.0
-    return clamp(avg_score / 100.0, -1.0, 1.0)
+    return 0.0
 
 
-# =============================================================================
-# Main LLM Function
-# =============================================================================
+def analyze_technical_json(indicators: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Synchronous wrapper for LLM analysis.
+    
+    Args:
+        indicators: Technical indicators dictionary
+    
+    Returns:
+        {
+            "score": float,
+            "confidence": float,
+            "tone": str,
+            "summary": str
+        }
+    """
+    try:
+        result = asyncio.run(run_technical_llm(indicators))
+        return {
+            "score": result.get("score", 0.0),
+            "confidence": result.get("confidence", 0.5),
+            "tone": result.get("tone", "neutral"),
+            "summary": result.get("summary", "")
+        }
+    except Exception as e:
+        return {
+            "score": 0.0,
+            "confidence": 0.0,
+            "tone": "neutral",
+            "summary": f"LLM error: {str(e)}"
+        }
+
 
 async def run_technical_llm(
     input_data: dict,
@@ -214,17 +215,46 @@ async def run_technical_llm(
     Send technical JSON to DeepSeek and return strictly-validated verdict.
     
     Args:
-        input_data: Technical analysis JSON (e.g., UNH payload)
+        input_data: Technical indicators from calculate_all_indicators.py
         model: DeepSeek model name (default: "deepseek-chat")
-        temperature: Sampling temperature (default: 0.2)
+        temperature: Sampling temperature
     
     Returns:
         Validated verdict dictionary matching OUTPUT_SCHEMA
     """
     api_key = get_deepseek_api_key()
     
-    # Build messages
-    user_content = f"DATA:\n{json.dumps(input_data, ensure_ascii=False, indent=2)}"
+    # Extract metadata from flat structure
+    symbol = input_data.get("id", {}).get("symbol", "UNKNOWN")
+    asof = input_data.get("asof", "")
+    vol_regime = input_data.get("volatility", {}).get("vol_regime", "unknown")
+    
+    # Extract liquidity checks
+    volume_liquidity = input_data.get("volume_liquidity", {})
+    avg_dollar_vol = volume_liquidity.get("avg_dollar_vol_21d", 0)
+    liquidity_score = volume_liquidity.get("liquidity_score_0_100", 0)
+    
+    # Determine liquidity status
+    liquidity_ok = (avg_dollar_vol >= 10_000_000 and liquidity_score >= 50)
+    min_dollar_filter = avg_dollar_vol >= 10_000_000
+    min_liquidity_filter = liquidity_score >= 50
+    
+    # Build user message with context
+    user_content = f"""Analyze this stock for 1-week forward horizon:
+
+Symbol: {symbol}
+Date: {asof}
+Volatility Regime: {vol_regime}
+
+Liquidity Check: {"PASS" if liquidity_ok else "FAIL"}
+- Avg Dollar Volume (21d): ${avg_dollar_vol:,.0f}
+- Liquidity Score: {liquidity_score:.1f}/100
+
+Technical Indicators:
+{json.dumps(input_data, ensure_ascii=False, indent=2)}
+
+Return JSON with: tone, score, summary, key_reasons, risk_flags, confidence"""
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content}
@@ -236,7 +266,7 @@ async def run_technical_llm(
         "messages": messages,
         "temperature": temperature,
         "max_tokens": MAX_TOKENS,
-        "response_format": {"type": "json_object"}  # Request JSON mode
+        "response_format": {"type": "json_object"}
     }
     
     headers = {
@@ -255,8 +285,36 @@ async def run_technical_llm(
             content = result["choices"][0]["message"]["content"]
             raw_output = json.loads(content)
             
-            # Validate and harden
-            return validate_and_harden(raw_output, input_data)
+            # Build validated output with correct structure
+            score = float(raw_output.get("score", 0.0))
+            confidence = float(raw_output.get("confidence", 0.5))
+            tone = raw_output.get("tone", "neutral")
+            
+            # Force neutral if liquidity fails
+            if not liquidity_ok:
+                score = 0.0
+                tone = "neutral"
+                confidence = 0.1
+            
+            validated = {
+                "symbol": symbol,
+                "asof": asof,
+                "tone": tone if tone in ["bullish", "bearish", "neutral"] else "neutral",
+                "score": clamp(score, -1.0, 1.0),
+                "summary": str(raw_output.get("summary", ""))[:500],
+                "key_reasons": raw_output.get("key_reasons", [])[:6] if isinstance(raw_output.get("key_reasons"), list) else [],
+                "risk_flags": raw_output.get("risk_flags", [])[:10] if isinstance(raw_output.get("risk_flags"), list) else [],
+                "liquidity_ok": liquidity_ok,
+                "min_exec_checks": {
+                    "min_dollar_volume_filter": min_dollar_filter,
+                    "min_liquidity_score_filter": min_liquidity_filter
+                },
+                "suggested_action": raw_output.get("suggested_action", "hold"),
+                "hold_period_days": 7,
+                "confidence": clamp(confidence, 0.0, 1.0)
+            }
+            
+            return validated
             
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             print(f"Warning: First attempt failed to parse JSON: {e}")
@@ -276,35 +334,54 @@ async def run_technical_llm(
                 content = result["choices"][0]["message"]["content"]
                 raw_output = json.loads(content)
                 
-                return validate_and_harden(raw_output, input_data)
+                # Build validated output
+                score = float(raw_output.get("score", 0.0))
+                confidence = float(raw_output.get("confidence", 0.5))
+                tone = raw_output.get("tone", "neutral")
+                
+                if not liquidity_ok:
+                    score = 0.0
+                    tone = "neutral"
+                    confidence = 0.1
+                
+                return {
+                    "symbol": symbol,
+                    "asof": asof,
+                    "tone": tone if tone in ["bullish", "bearish", "neutral"] else "neutral",
+                    "score": clamp(score, -1.0, 1.0),
+                    "summary": str(raw_output.get("summary", ""))[:500],
+                    "key_reasons": raw_output.get("key_reasons", [])[:6] if isinstance(raw_output.get("key_reasons"), list) else [],
+                    "risk_flags": raw_output.get("risk_flags", [])[:10] if isinstance(raw_output.get("risk_flags"), list) else [],
+                    "liquidity_ok": liquidity_ok,
+                    "min_exec_checks": {
+                        "min_dollar_volume_filter": min_dollar_filter,
+                        "min_liquidity_score_filter": min_liquidity_filter
+                    },
+                    "suggested_action": raw_output.get("suggested_action", "hold"),
+                    "hold_period_days": 7,
+                    "confidence": clamp(confidence, 0.0, 1.0)
+                }
                 
             except Exception as retry_error:
                 print(f"Error: Retry also failed: {retry_error}")
                 
-                # Return minimal fallback with computed score
-                fallback_score = compute_fallback_score(input_data)
-                volume_liquidity = input_data.get("Volume_Liquidity", {})
-                liquidity_ok = (
-                    volume_liquidity.get("min_dollar_volume_filter", False) and
-                    volume_liquidity.get("min_liquidity_score_filter", False)
-                )
-                
+                # Return minimal fallback
                 return {
-                    "symbol": input_data.get("metadata", {}).get("symbol", "UNKNOWN"),
-                    "asof": input_data.get("metadata", {}).get("asof", ""),
-                    "tone": "neutral" if not liquidity_ok else ("bullish" if fallback_score > 0.2 else "bearish" if fallback_score < -0.2 else "neutral"),
-                    "score": 0.0 if not liquidity_ok else fallback_score,
-                    "summary": "LLM analysis unavailable. Using fallback scoring from composites.",
+                    "symbol": symbol,
+                    "asof": asof,
+                    "tone": "neutral",
+                    "score": 0.0,
+                    "summary": f"LLM analysis failed: {str(retry_error)}",
                     "key_reasons": [],
-                    "risk_flags": ["llm_unavailable"],
+                    "risk_flags": ["llm_error"],
                     "liquidity_ok": liquidity_ok,
                     "min_exec_checks": {
-                        "min_dollar_volume_filter": volume_liquidity.get("min_dollar_volume_filter", False),
-                        "min_liquidity_score_filter": volume_liquidity.get("min_liquidity_score_filter", False)
+                        "min_dollar_volume_filter": min_dollar_filter,
+                        "min_liquidity_score_filter": min_liquidity_filter
                     },
-                    "suggested_action": "hold" if not liquidity_ok else "long" if fallback_score > 0.2 else "short" if fallback_score < -0.2 else "hold",
+                    "suggested_action": "hold",
                     "hold_period_days": 7,
-                    "confidence": 0.3
+                    "confidence": 0.0
                 }
         
         except httpx.HTTPStatusError as e:

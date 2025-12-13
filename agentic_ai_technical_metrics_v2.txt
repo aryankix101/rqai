@@ -1,0 +1,214 @@
+Technical Indicator Metrics Schema for the Technical Module (v2)
+
+Trend & Momentum Indicators (Price Direction and Speed)
+
+Price Momentum (Returns)
+• mom_1m, mom_3m, mom_6m (primary momentum horizons)
+• mom_12m (secondary; lower weight for weekly horizon)
+All momentum values should be normalized (z-score or percentile).
+
+Moving Averages and Trend Structure
+• ma50, ma200
+• price_above_ma50 (bool)
+• price_above_ma200 (bool)
+• golden_cross_recent, death_cross_recent
+• higher_highs_lows (categorical: uptrend, downtrend, mixed)
+
+MACD
+• macd_line
+• macd_signal
+• macd_histogram (primary MACD input)
+• macd_bull_cross, macd_bear_cross (optional events)
+
+RSI (Stretch / Exhaustion Only)
+• rsi_14d
+• rsi_overbought, rsi_oversold (optional, not used as direct signals)
+
+ADX (Trend Strength)
+• adx_14d (e.g., >25 = trending)
+
+
+
+Volatility and Risk Indicators (Fluctuation and Risk Profile)
+
+Realized Volatility and Regime Inputs
+• realized_vol_21d
+• realized_vol_252d
+• vol_ratio_21v252 
+• Optional: realized_vol_63d smoothing
+Volatility regime is derived:
+vol_regime ∈ {high, neutral, low}
+
+Optional Implied Volatility
+• IV_rank (or option IV percentile)
+
+Beta and Correlation
+• beta_1y
+• corr_sp500
+• r2_sp500
+
+Risk-Adjusted Performance
+• sharpe_1y
+• sortino_1y
+
+Drawdowns
+• max_drawdown_1y
+
+ATR
+• atr_14d (absolute or percent)
+
+
+
+Volume and Liquidity Indicators (Activity and Executability)
+
+Liquidity and Executability (Hard Filters)
+• avg_vol_3m (shares)
+• avg_dollar_vol_21d
+• turnover_pct_21 (optional)
+• roll_spread_21
+• cs_spread_21 (Corwin-Schultz spread)
+• liquidity_score_0_100 (composite)
+
+Volume Confirmation (Signal Support)
+• vol_last
+• volume_spike_z (Z-score normalized)
+• obv_trend_21d (up, down, flat)
+• acc_dist_trend_21d (up, down, flat)
+
+
+
+Price Pattern & Event Indicators
+Gap Events
+• gap_up, gap_down
+• gap_size_pct
+
+52-Week Extremes
+• new_52w_high
+• new_52w_low
+• pct_from_52w_high (optional)
+• pct_from_52w_low (optional)
+
+Structure
+• higher_highs
+• higher_lows
+• prior_swing_break_up
+• prior_swing_break_down
+
+Regime and Volatility Shifts
+• vol_regime 
+
+
+
+Relative Performance & Comparative Metrics 
+Relative Strength vs Index
+• vs_sp500_3m
+• vs_sp500_6m
+• vs_sp500_12m
+• rel_strength_trend (rising, flat, falling)
+
+Sector and Industry Comparison
+• rel_strength_sector_3m
+• sector_rank_percentile
+
+Capture Ratios
+• up_capture_1y
+• down_capture_1y
+
+Optional
+• corr_to_factor_x
+• r2_to_factor_x
+• seasonality_score
+• hurst
+
+
+Example JSON Payload
+{
+  "asof": "2025-12-11",
+  "id": {
+    "symbol": "CRM",
+    "country": "US",
+    "currency": "USD",
+    "sector": "Technology",
+    "industry": "Software"
+  },
+
+  "momentum": {
+    "mom_1m": 0.02,
+    "mom_3m": -0.03,
+    "mom_6m": 0.05,
+    "mom_12m": 0.08
+  },
+
+  "trend": {
+    "ma50": 150.25,
+    "ma200": 140.10,
+    "price_above_ma50": true,
+    "price_above_ma200": true,
+    "golden_cross_recent": true,
+    "death_cross_recent": false,
+    "higher_highs_lows": "uptrend",
+    "rsi_14d": 72.5,
+    "macd_line": 1.2,
+    "macd_signal": 0.8,
+    "macd_histogram": 0.4,
+    "adx_14d": 28.0
+  },
+
+  "volatility": {
+    "realized_vol_21d": 0.18,
+    "realized_vol_252d": 0.20,
+    "vol_ratio_21v252": 0.90,
+    "atr_14d": 3.5,
+    "IV_rank": 20,
+    "vol_regime": "neutral"
+  },
+
+  "risk": {
+    "beta_1y": 1.10,
+    "corr_sp500": 0.82,
+    "r2_sp500": 0.67,
+    "sharpe_1y": 0.80,
+    "sortino_1y": 1.10,
+    "max_drawdown_1y": 0.25
+  },
+
+  "volume_liquidity": {
+    "avg_vol_3m": 5000000,
+    "avg_dollar_vol_21d": 150000000,
+    "vol_last": 12000000,
+    "volume_spike_z": 2.3,
+    "obv_trend_21d": "up",
+    "acc_dist_trend_21d": "up",
+    "roll_spread_21": 0.0015,
+    "cs_spread_21": 0.0020,
+    "liquidity_score_0_100": 85
+  },
+
+  "events": {
+    "gap_up": false,
+    "gap_down": false,
+    "gap_size_pct": 0.0,
+    "new_52w_high": false,
+    "new_52w_low": false
+  },
+
+  "relative_perf": {
+    "vs_sp500_3m": 0.04,
+    "vs_sp500_6m": 0.06,
+    "vs_sp500_12m": 0.10,
+    "vs_sector_3m": 0.01,
+    "rel_strength_trend": "rising",
+    "sector_rank_percentile": 75,
+    "up_capture_1y": 1.10,
+    "down_capture_1y": 0.95
+  },
+
+  "composites": {
+    "momentum_score": 0.45,
+    "trend_score": 0.60,
+    "rs_score": 0.35,
+    "volume_confirm_score": 0.80,
+    "risk_score": 0.55,
+    "tier1_master_score": 0.52
+  }
+}

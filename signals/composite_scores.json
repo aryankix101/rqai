@@ -1,0 +1,210 @@
+{
+  "JNJ": {
+    "symbol": "JNJ",
+    "momentum_composite": {
+      "score": 0.6441323503356753,
+      "components": {
+        "momentum_returns": 0.9338969112692794,
+        "macd_signal": -0.0425690738010609,
+        "rsi_moderation": -0.010816727926080532
+      },
+      "interpretation": "Strong bullish momentum"
+    },
+    "trend_composite": {
+      "score": 0.7960736279722793,
+      "components": {
+        "ma_structure": 1.0,
+        "price_structure": 0.8,
+        "adx_multiplier": 0.8652974217089993,
+        "cross_boost": 0.0
+      },
+      "interpretation": "Strong uptrend (strong ADX=34.6)"
+    },
+    "rs_composite": {
+      "score": 0.46724462393955596,
+      "components": {
+        "relative_performance": 0.667244623939556,
+        "trend_bonus": -0.2,
+        "capture_ratio_score": 0.0
+      },
+      "interpretation": "Moderate outperformance vs S&P 500"
+    },
+    "volume_composite": {
+      "score": 1.0,
+      "components": {
+        "obv": 1.0,
+        "accumulation_distribution": 1.0,
+        "volume_spike": 0.6,
+        "confirmation_bonus": 0.2
+      },
+      "interpretation": "Strong volume confirmation"
+    },
+    "risk_composite": {
+      "score": 1.0,
+      "components": {
+        "sharpe": 0.9595899411294734,
+        "sortino": 0.8339039111355145,
+        "max_drawdown": 1.4647033987499878,
+        "volatility": 1.0,
+        "beta": 0.7
+      },
+      "interpretation": "Excellent risk profile"
+    }
+  },
+  "ADBE": {
+    "symbol": "ADBE",
+    "momentum_composite": {
+      "score": 0.14243737356050248,
+      "components": {
+        "momentum_returns": -0.012951972187243949,
+        "macd_signal": 0.7575187704578661,
+        "rsi_moderation": 0.0
+      },
+      "interpretation": "Neutral momentum"
+    },
+    "trend_composite": {
+      "score": -0.3981674142565205,
+      "components": {
+        "ma_structure": -0.5,
+        "price_structure": -0.8,
+        "adx_multiplier": 0.6422055068653556,
+        "cross_boost": 0.0
+      },
+      "interpretation": "Moderate downtrend (strong ADX=25.7)"
+    },
+    "rs_composite": {
+      "score": -0.5703507184997354,
+      "components": {
+        "relative_performance": -0.6203507184997354,
+        "trend_bonus": 0.2,
+        "capture_ratio_score": -0.15
+      },
+      "interpretation": "Strong underperformance vs S&P 500"
+    },
+    "volume_composite": {
+      "score": 0.46,
+      "components": {
+        "obv": 0.5,
+        "accumulation_distribution": 0.5,
+        "volume_spike": 0.3,
+        "confirmation_bonus": 0.0
+      },
+      "interpretation": "Neutral volume"
+    },
+    "risk_composite": {
+      "score": 0.2855119318028027,
+      "components": {
+        "sharpe": 0.0,
+        "sortino": 0.0,
+        "max_drawdown": 0.14204772721121084,
+        "volatility": 1.0,
+        "beta": 1.0
+      },
+      "interpretation": "Unfavorable risk profile"
+    }
+  },
+  "CSX": {
+    "symbol": "CSX",
+    "momentum_composite": {
+      "score": 0.44488961350131817,
+      "components": {
+        "momentum_returns": 0.6205616393327077,
+        "macd_signal": 0.05345903741304148,
+        "rsi_moderation": -0.001953415141855075
+      },
+      "interpretation": "Moderate bullish momentum"
+    },
+    "trend_composite": {
+      "score": 0.3261532820763039,
+      "components": {
+        "ma_structure": 1.0,
+        "price_structure": 0.0,
+        "adx_multiplier": 0.5435888034605065,
+        "cross_boost": 0.0
+      },
+      "interpretation": "Moderate uptrend (moderate ADX=21.7)"
+    },
+    "rs_composite": {
+      "score": 0.4368296803000179,
+      "components": {
+        "relative_performance": 0.23360580826062993,
+        "trend_bonus": 0.2,
+        "capture_ratio_score": 0.0032238720393879317
+      },
+      "interpretation": "Moderate outperformance vs S&P 500"
+    },
+    "volume_composite": {
+      "score": 0.7200000000000001,
+      "components": {
+        "obv": 1.0,
+        "accumulation_distribution": 0.5,
+        "volume_spike": 0.6,
+        "confirmation_bonus": 0.0
+      },
+      "interpretation": "Good volume confirmation"
+    },
+    "risk_composite": {
+      "score": 0.7233015463791961,
+      "components": {
+        "sharpe": 0.48135458912154466,
+        "sortino": 0.409289569321299,
+        "max_drawdown": 1.1081490231138917,
+        "volatility": 1.0,
+        "beta": 0.7
+      },
+      "interpretation": "Good risk profile"
+    }
+  },
+  "NKE": {
+    "symbol": "NKE",
+    "momentum_composite": {
+      "score": 0.12059931995164971,
+      "components": {
+        "momentum_returns": 0.14519387680666365,
+        "macd_signal": 0.0948180309349258,
+        "rsi_moderation": 0.0
+      },
+      "interpretation": "Neutral momentum"
+    },
+    "trend_composite": {
+      "score": 0.29030546351291675,
+      "components": {
+        "ma_structure": 1.0,
+        "price_structure": 0.0,
+        "adx_multiplier": 0.48384243918819464,
+        "cross_boost": 0.0
+      },
+      "interpretation": "Moderate uptrend (weak ADX=19.4)"
+    },
+    "rs_composite": {
+      "score": -0.5310927935364027,
+      "components": {
+        "relative_performance": -0.4545822254164303,
+        "trend_bonus": 0.0,
+        "capture_ratio_score": -0.07651056811997241
+      },
+      "interpretation": "Strong underperformance vs S&P 500"
+    },
+    "volume_composite": {
+      "score": 0.9600000000000002,
+      "components": {
+        "obv": 1.0,
+        "accumulation_distribution": 0.5,
+        "volume_spike": 0.8,
+        "confirmation_bonus": 0.2
+      },
+      "interpretation": "Strong volume confirmation"
+    },
+    "risk_composite": {
+      "score": 0.4458643131377933,
+      "components": {
+        "sharpe": 0.23899690743432545,
+        "sortino": 0.15021662512800743,
+        "max_drawdown": 0.5564876635275768,
+        "volatility": 0.7,
+        "beta": 1.0
+      },
+      "interpretation": "Moderate risk profile"
+    }
+  }
+}

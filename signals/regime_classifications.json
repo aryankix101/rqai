@@ -1,0 +1,86 @@
+{
+  "JNJ": {
+    "symbol": "JNJ",
+    "volatility_regime": {
+      "regime": "neutral",
+      "realized_vol_252d": 0.19651967751021482,
+      "vol_ratio_21v252": 0.8260423542957446,
+      "vol_spiking": false,
+      "description": "Normal volatility (19.7% annualized)"
+    },
+    "trend_regime": {
+      "regime": "uptrend",
+      "trend_strength": "strong",
+      "adx": 34.61189686835997,
+      "price_structure": "uptrend",
+      "ma_alignment": "bullish",
+      "description": "Uptrend (strong trend, ADX=34.6) - Price above key MAs"
+    },
+    "combined_regime": "uptrend_neutral_vol",
+    "regime_score": 1.0,
+    "description": "Uptrend (strong trend, ADX=34.6) - Price above key MAs | Normal volatility (19.7% annualized)"
+  },
+  "ADBE": {
+    "symbol": "ADBE",
+    "volatility_regime": {
+      "regime": "neutral",
+      "realized_vol_252d": 0.3440490929797082,
+      "vol_ratio_21v252": 0.8684680672628023,
+      "vol_spiking": false,
+      "description": "Normal volatility (34.4% annualized)"
+    },
+    "trend_regime": {
+      "regime": "choppy",
+      "trend_strength": "strong",
+      "adx": 25.688220274614224,
+      "price_structure": "downtrend",
+      "ma_alignment": "mixed",
+      "description": "Choppy/Sideways (ADX=25.7)"
+    },
+    "combined_regime": "choppy_neutral_vol",
+    "regime_score": 0.8,
+    "description": "Choppy/Sideways (ADX=25.7) | Normal volatility (34.4% annualized)"
+  },
+  "CSX": {
+    "symbol": "CSX",
+    "volatility_regime": {
+      "regime": "neutral",
+      "realized_vol_252d": 0.23714229729819186,
+      "vol_ratio_21v252": 0.821844349222252,
+      "vol_spiking": false,
+      "description": "Normal volatility (23.7% annualized)"
+    },
+    "trend_regime": {
+      "regime": "uptrend",
+      "trend_strength": "moderate",
+      "adx": 21.74355213842026,
+      "price_structure": "mixed",
+      "ma_alignment": "bullish",
+      "description": "Uptrend (moderate trend, ADX=21.7) - Price above key MAs"
+    },
+    "combined_regime": "uptrend_neutral_vol",
+    "regime_score": 0.85,
+    "description": "Uptrend (moderate trend, ADX=21.7) - Price above key MAs | Normal volatility (23.7% annualized)"
+  },
+  "NKE": {
+    "symbol": "NKE",
+    "volatility_regime": {
+      "regime": "high",
+      "realized_vol_252d": 0.40006276011640074,
+      "vol_ratio_21v252": 0.7992389740118673,
+      "vol_spiking": false,
+      "description": "High volatility (40.0% annualized)"
+    },
+    "trend_regime": {
+      "regime": "choppy",
+      "trend_strength": "weak",
+      "adx": 19.353697567527785,
+      "price_structure": "mixed",
+      "ma_alignment": "bullish",
+      "description": "Choppy/Sideways (ADX=19.4) - No clear direction"
+    },
+    "combined_regime": "choppy_high_vol",
+    "regime_score": 0.09999999999999998,
+    "description": "Choppy/Sideways (ADX=19.4) - No clear direction | High volatility (40.0% annualized)"
+  }
+}

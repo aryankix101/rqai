@@ -1,0 +1,119 @@
+{
+  "passed": [
+    "JNJ",
+    "ADBE",
+    "CSX",
+    "NKE"
+  ],
+  "failed": [],
+  "results": {
+    "JNJ": {
+      "pass": true,
+      "liquidity_gate": {
+        "pass": true,
+        "reason": "PASS - Meets all liquidity requirements",
+        "checks": {
+          "min_dollar_volume_filter": true,
+          "min_liquidity_score_filter": true,
+          "max_spread_filter": true,
+          "min_volume_filter": true
+        },
+        "metrics": {
+          "avg_dollar_vol_21d": 1978277620.4080775,
+          "liquidity_score": 95,
+          "cs_spread_21": 0.0,
+          "avg_vol_3m": 8881317.349206349
+        }
+      },
+      "data_sanity": {
+        "pass": true,
+        "reason": "PASS - All data fields valid",
+        "missing_fields": [],
+        "invalid_fields": []
+      },
+      "symbol": "JNJ",
+      "reason": "PASS - Meets liquidity and data quality requirements"
+    },
+    "ADBE": {
+      "pass": true,
+      "liquidity_gate": {
+        "pass": true,
+        "reason": "PASS - Meets all liquidity requirements",
+        "checks": {
+          "min_dollar_volume_filter": true,
+          "min_liquidity_score_filter": true,
+          "max_spread_filter": true,
+          "min_volume_filter": true
+        },
+        "metrics": {
+          "avg_dollar_vol_21d": 1409549600.597619,
+          "liquidity_score": 75,
+          "cs_spread_21": 0.0,
+          "avg_vol_3m": 4196775.476190476
+        }
+      },
+      "data_sanity": {
+        "pass": true,
+        "reason": "PASS - All data fields valid",
+        "missing_fields": [],
+        "invalid_fields": []
+      },
+      "symbol": "ADBE",
+      "reason": "PASS - Meets liquidity and data quality requirements"
+    },
+    "CSX": {
+      "pass": true,
+      "liquidity_gate": {
+        "pass": true,
+        "reason": "PASS - Meets all liquidity requirements",
+        "checks": {
+          "min_dollar_volume_filter": true,
+          "min_liquidity_score_filter": true,
+          "max_spread_filter": true,
+          "min_volume_filter": true
+        },
+        "metrics": {
+          "avg_dollar_vol_21d": 461644933.6021962,
+          "liquidity_score": 95,
+          "cs_spread_21": 0.0,
+          "avg_vol_3m": 14285612.825396825
+        }
+      },
+      "data_sanity": {
+        "pass": true,
+        "reason": "PASS - All data fields valid",
+        "missing_fields": [],
+        "invalid_fields": []
+      },
+      "symbol": "CSX",
+      "reason": "PASS - Meets liquidity and data quality requirements"
+    },
+    "NKE": {
+      "pass": true,
+      "liquidity_gate": {
+        "pass": true,
+        "reason": "PASS - Meets all liquidity requirements",
+        "checks": {
+          "min_dollar_volume_filter": true,
+          "min_liquidity_score_filter": true,
+          "max_spread_filter": true,
+          "min_volume_filter": true
+        },
+        "metrics": {
+          "avg_dollar_vol_21d": 866648944.3496299,
+          "liquidity_score": 95,
+          "cs_spread_21": 0.0,
+          "avg_vol_3m": 15146775.015873017
+        }
+      },
+      "data_sanity": {
+        "pass": true,
+        "reason": "PASS - All data fields valid",
+        "missing_fields": [],
+        "invalid_fields": []
+      },
+      "symbol": "NKE",
+      "reason": "PASS - Meets liquidity and data quality requirements"
+    }
+  }
+}

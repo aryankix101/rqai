@@ -1,0 +1,84 @@
+{
+  "asof": "2025-12-11",
+  "id": {
+    "symbol": "JNJ",
+    "country": "US",
+    "currency": "USD",
+    "sector": "Unknown",
+    "industry": "Unknown"
+  },
+  "momentum": {
+    "mom_1m": 0.09029050889230339,
+    "mom_3m": 0.18685279871163307,
+    "mom_6m": 0.3589151232670047,
+    "mom_12m": 0.4465989358455156
+  },
+  "trend": {
+    "ma50": 194.28614836754596,
+    "price_above_ma50": true,
+    "ma200": 168.97652346096945,
+    "price_above_ma200": true,
+    "golden_cross_recent": false,
+    "death_cross_recent": false,
+    "higher_highs_lows": "uptrend",
+    "macd_line": 3.6922727597516314,
+    "macd_signal": 3.905118128756935,
+    "macd_histogram": -0.21284536900530382,
+    "macd_bull_cross": false,
+    "macd_bear_cross": false,
+    "rsi_14d": 72.1633455852161,
+    "rsi_overbought": true,
+    "rsi_oversold": false,
+    "adx_14d": 34.61189686835997
+  },
+  "volatility": {
+    "realized_vol_21d": 0.16233357707597834,
+    "realized_vol_63d": 0.15295419321756498,
+    "realized_vol_252d": 0.19651967751021482,
+    "vol_ratio_21v252": 0.8260423542957446,
+    "atr_14d": 3.404755153321006,
+    "atr_14d_pct": 0.01621234776115902,
+    "vol_regime": "neutral"
+  },
+  "risk": {
+    "beta_1y": 0.07002185165795877,
+    "corr_sp500": 0.06959979557899727,
+    "r2_sp500": 0.0048441315446382084,
+    "sharpe_1y": 1.8787698233884202,
+    "sortino_1y": 2.335615644542058,
+    "max_drawdown_1y": 0.13382415031250305,
+    "up_capture_1y": 0.2297566965164547,
+    "down_capture_1y": -0.15198309070596666
+  },
+  "volume_liquidity": {
+    "avg_vol_3m": 8881317.349206349,
+    "avg_dollar_vol_21d": 1978277620.4080775,
+    "vol_last": 9008960.0,
+    "volume_spike_z": -0.2966427847099066,
+    "obv_trend_21d": "up",
+    "acc_dist_trend_21d": "up",
+    "roll_spread_21": 0.0,
+    "cs_spread_21": 0.0,
+    "liquidity_score_0_100": 95
+  },
+  "events": {
+    "gap_up": false,
+    "gap_down": false,
+    "gap_size_pct": 0.006584680933475422,
+    "new_52w_high": true,
+    "new_52w_low": false,
+    "pct_from_52w_high": -0.005799228347575083,
+    "pct_from_52w_low": 0.5383224395964902,
+    "higher_highs": true,
+    "higher_lows": true,
+    "prior_swing_break_up": true,
+    "prior_swing_break_down": false
+  },
+  "relative_perf": {
+    "vs_sp500_3m": 0.13564976800970086,
+    "vs_sp500_6m": 0.2108913758461819,
+    "vs_sp500_12m": 0.2930720701728047,
+    "rel_strength_trend": "falling",
+    "rel_strength_sector_3m": null
+  }
+}
