@@ -1,5 +1,5 @@
 # Secrets and API keys
-
+secrets.json
 # Cache and output directories
 cache/
 out/
