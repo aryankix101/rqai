@@ -78,6 +78,16 @@ def fuse_signals(
             base_signal = 0.0
             confidence_llm = 0.1
     
+    # Apply risk adjustment - high risk_score means LOW risk, so invert it
+    # Risk score is already constructed where high score = low risk
+    # But we want high risk to REDUCE the signal, so we subtract (1 - risk_score)
+    risk_score = tier1_result.get('risk_score', 0.5)
+    risk_penalty = (1.0 - risk_score) * 0.15  # High risk → larger penalty
+    base_signal = base_signal * (1.0 - risk_penalty)
+    
+    if verbose and risk_penalty > 0.05:
+        logger.info(f"PENALTY: Risk adjustment → reducing signal by {risk_penalty:.1%}")
+    
     # Check for agreement/divergence
     agreement_type, agreement_score = _assess_agreement(
         signal_deterministic, signal_llm, confidence_deterministic, confidence_llm
@@ -103,35 +113,40 @@ def fuse_signals(
         if verbose:
             logger.info(f"PENALTY: High volatility → reducing signal by {volatility_penalty:.1%}")
     
-    # CONFIDENCE MODIFIERS
+    # =========================================================================
+    # CONFIDENCE TRACKING (METADATA ONLY - DOES NOT AFFECT SIGNAL)
+    # =========================================================================
+    # Confidence is tracked separately for post-hoc analysis.
+    # It does NOT scale or modify the directional signal.
+    # Signal = what we believe (direction/conviction)
+    # Confidence = how certain we are (for later analysis/sizing if proven useful)
+    
     base_confidence = confidence_llm
     
-    # Boost confidence if LLM is highly confident
+    # Track confidence modifiers WITHOUT affecting signal
     if confidence_llm > 0.75:
         confidence_boost = HIGH_CONFIDENCE_BOOST
         base_confidence = min(1.0, base_confidence + confidence_boost)
         if verbose:
-            logger.info(f"BOOST: High LLM confidence → +{confidence_boost:.1%}")
+            logger.info(f"CONFIDENCE: High LLM confidence → +{confidence_boost:.1%} (metadata only)")
     
-    # Reduce confidence if LLM is uncertain
     elif confidence_llm < MIN_CONFIDENCE:
-        base_signal *= 0.5
         base_confidence *= 0.5
         if verbose:
-            logger.info(f"PENALTY: Low LLM confidence → reducing signal and confidence by 50%")
+            logger.info(f"CONFIDENCE: Low LLM confidence → -50% confidence (metadata only)")
     
     # Factor in deterministic confidence for agreement
     if agreement_type == "aligned":
-        # Aligned signals boost confidence
+        # Aligned signals boost confidence (metadata)
         conf_boost = 0.1 * agreement_score
         base_confidence = min(1.0, base_confidence + conf_boost)
         if verbose:
-            logger.info(f"BOOST: Signals aligned → +{conf_boost:.2f} confidence")
+            logger.info(f"CONFIDENCE: Signals aligned → +{conf_boost:.2f} confidence (metadata only)")
     elif agreement_type == "divergent":
-        # Divergence reduces confidence
+        # Divergence reduces confidence (metadata)
         base_confidence *= 0.7
         if verbose:
-            logger.info(f"PENALTY: Signals divergent → -30% confidence")
+            logger.info(f"CONFIDENCE: Signals divergent → -30% confidence (metadata only)")
     
     signal_final = base_signal
     confidence_final = base_confidence

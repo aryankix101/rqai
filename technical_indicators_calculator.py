@@ -49,6 +49,64 @@ class TechnicalIndicatorCalculator:
             return bool(val)
         return bool(val)
     
+    def robust_zscore(self, x: float, history: np.ndarray) -> Optional[float]:
+        """
+        Calculate robust z-score using median and MAD (Median Absolute Deviation).
+        
+        Formula: z = (x - median) / (1.4826 * MAD)
+        
+        The 1.4826 factor makes MAD comparable to std for normal distributions.
+        More resistant to outliers than mean/std z-score.
+        
+        Args:
+            x: Current value to score
+            history: Historical values for computing median/MAD
+        
+        Returns:
+            Robust z-score, or None if insufficient data
+        """
+        history = history[~np.isnan(history)]
+        if len(history) < 30:
+            return None
+        
+        median = np.median(history)
+        mad = np.median(np.abs(history - median))
+        
+        # Avoid division by zero
+        if mad < 1e-10:
+            return 0.0
+        
+        z = (x - median) / (1.4826 * mad)
+        return z
+    
+    def robust_zscore_sigmoid(self, x: float, history: np.ndarray, k: float = 2.0) -> Optional[float]:
+        """
+        Calculate robust z-score and squash to [-1, +1] using tanh (SIGNED).
+        
+        Steps:
+        1. Compute robust z-score: z = (x - median) / (1.4826 * MAD)
+        2. Clip z to [-3, +3] to avoid extreme values
+        3. Squash: score = tanh(z/k)  [SIGNED for LONG/SHORT logic]
+        
+        Args:
+            x: Current value to score
+            history: Historical values for computing median/MAD
+            k: Steepness factor (default 2.0, so ±2σ → ~±0.76)
+        
+        Returns:
+            Signed score in [-1, +1], or None if insufficient data
+        """
+        z = self.robust_zscore(x, history)
+        if z is None:
+            return None
+        
+        # Clip to [-3, +3]
+        z = np.clip(z, -3.0, 3.0)
+        
+        # Squash to [-1, +1] using tanh (preserves sign)
+        score = np.tanh(z / k)
+        return score
+    
     # =========================================================================
     # MOMENTUM INDICATORS
     # =========================================================================
@@ -56,11 +114,47 @@ class TechnicalIndicatorCalculator:
     def calculate_momentum(self) -> Dict[str, Optional[float]]:
         """
         Calculate price momentum (returns) over multiple horizons.
-        Returns normalized z-scores.
+        Returns both raw returns and z-scores normalized to stock's own history.
         """
         results = {}
         
-        # Calculate raw returns
+        # Short-horizon returns for T+1 prediction
+        short_periods = {
+            'ret_1d': 1,
+            'ret_2d': 2,
+            'ret_3d': 3,
+            'ret_5d': 5,
+            'ret_10d': 10
+        }
+        
+        for key, period in short_periods.items():
+            if len(self.close) >= period + 1:
+                ret = (self.close[-1] / self.close[-period-1]) - 1.0
+                results[key] = self.safe_float(ret)
+                
+                # Calculate ROBUST z-score for short-horizon returns
+                # Uses median/MAD instead of mean/std for outlier resistance
+                lookback = min(252, len(self.close) - period - 1)
+                if lookback >= 50:
+                    historical_returns = []
+                    for i in range(lookback):
+                        idx = -(i + 1)
+                        start_idx = idx - period
+                        if abs(start_idx) < len(self.close):
+                            hist_ret = (self.close[idx] / self.close[start_idx]) - 1.0
+                            if not np.isnan(hist_ret):
+                                historical_returns.append(hist_ret)
+                    
+                    hist_arr = np.array(historical_returns)
+                    z = self.robust_zscore(ret, hist_arr)
+                    results[f'{key}_zscore'] = self.safe_float(z) if z is not None else None
+                else:
+                    results[f'{key}_zscore'] = None
+            else:
+                results[key] = None
+                results[f'{key}_zscore'] = None
+        
+        # Calculate raw returns (longer horizons)
         periods = {
             'mom_1m': 21,   # ~1 month
             'mom_3m': 63,   # ~3 months
@@ -72,6 +166,59 @@ class TechnicalIndicatorCalculator:
             if len(self.close) >= period + 1:
                 ret = (self.close[-1] / self.close[-period-1]) - 1.0
                 results[key] = self.safe_float(ret)
+                
+                # Calculate ROBUST z-score using median/MAD
+                lookback = min(252, len(self.close) - period - 1)
+                if lookback >= 50:
+                    historical_returns = []
+                    for i in range(lookback):
+                        idx = -(i + 1)
+                        start_idx = idx - period
+                        if abs(start_idx) < len(self.close):
+                            hist_ret = (self.close[idx] / self.close[start_idx]) - 1.0
+                            if not np.isnan(hist_ret):
+                                historical_returns.append(hist_ret)
+                    
+                    hist_arr = np.array(historical_returns)
+                    z = self.robust_zscore(ret, hist_arr)
+                    results[f'{key}_zscore'] = self.safe_float(z) if z is not None else None
+                else:
+                    results[f'{key}_zscore'] = None
+            else:
+                results[key] = None
+                results[f'{key}_zscore'] = None
+        
+        # ==========================================================================
+        # Autocorrelation of returns (for regime detection)
+        # Positive autocorr = trending, Negative autocorr = mean-reverting
+        # ==========================================================================
+        autocorr_periods = {
+            'autocorr_5d': 5,
+            'autocorr_10d': 10,
+            'autocorr_21d': 21
+        }
+        
+        for key, lag in autocorr_periods.items():
+            # Need at least 2x the lag period for meaningful autocorrelation
+            min_obs = lag * 4
+            if len(self.close) >= min_obs:
+                # Calculate daily returns
+                returns = np.diff(np.log(self.close[-min_obs:]))
+                if len(returns) > lag:
+                    # Autocorrelation: correlation of returns with lagged returns
+                    ret_current = returns[lag:]
+                    ret_lagged = returns[:-lag]
+                    
+                    if len(ret_current) >= lag and np.std(ret_current) > 0.0001 and np.std(ret_lagged) > 0.0001:
+                        autocorr = np.corrcoef(ret_current, ret_lagged)[0, 1]
+                        if not np.isnan(autocorr):
+                            results[key] = self.safe_float(autocorr)
+                        else:
+                            results[key] = 0.0
+                    else:
+                        results[key] = 0.0
+                else:
+                    results[key] = None
             else:
                 results[key] = None
         
@@ -87,35 +234,52 @@ class TechnicalIndicatorCalculator:
         """
         results = {}
         
-        # Moving Averages
-        if len(self.close) >= 50:
-            ma50 = talib.SMA(self.close, timeperiod=50)
-            results['ma50'] = self.safe_float(ma50[-1])
-            results['price_above_ma50'] = self.safe_bool(self.close[-1] > ma50[-1]) if not np.isnan(ma50[-1]) else None
+        # Moving Averages - SMA 20, 75, 200
+        if len(self.close) >= 20:
+            ma20 = talib.SMA(self.close, timeperiod=20)
+            results['ma20'] = self.safe_float(ma20[-1])
+            results['price_above_ma20'] = self.safe_bool(self.close[-1] > ma20[-1]) if not np.isnan(ma20[-1]) else None
         else:
-            results['ma50'] = None
-            results['price_above_ma50'] = None
+            results['ma20'] = None
+            results['price_above_ma20'] = None
+        
+        if len(self.close) >= 75:
+            ma75 = talib.SMA(self.close, timeperiod=75)
+            results['ma75'] = self.safe_float(ma75[-1])
+            results['price_above_ma75'] = self.safe_bool(self.close[-1] > ma75[-1]) if not np.isnan(ma75[-1]) else None
+        else:
+            results['ma75'] = None
+            results['price_above_ma75'] = None
         
         if len(self.close) >= 200:
             ma200 = talib.SMA(self.close, timeperiod=200)
             results['ma200'] = self.safe_float(ma200[-1])
             results['price_above_ma200'] = self.safe_bool(self.close[-1] > ma200[-1]) if not np.isnan(ma200[-1]) else None
             
-            # Golden/Death Cross detection (check last 5 days)
+            # MA200 slope regime flag (20-day slope)
+            if len(ma200) >= 20 and not np.isnan(ma200[-1]) and not np.isnan(ma200[-20]):
+                ma200_slope = (ma200[-1] - ma200[-20]) / ma200[-20]
+                results['ma200_slope_20d'] = self.safe_float(ma200_slope)
+                results['ma200_slope_up'] = self.safe_bool(ma200_slope > 0)
+            else:
+                results['ma200_slope_20d'] = None
+                results['ma200_slope_up'] = None
+            
+            # Golden/Death Cross detection (MA75 vs MA200, check last 5 days)
             if len(self.close) >= 205:
-                ma50_full = talib.SMA(self.close, timeperiod=50)
+                ma75_full = talib.SMA(self.close, timeperiod=75)
                 ma200_full = talib.SMA(self.close, timeperiod=200)
                 
-                # Golden cross: MA50 crosses above MA200
+                # Golden cross: MA75 crosses above MA200
                 golden_cross = False
                 death_cross = False
                 
                 for i in range(-5, 0):
-                    if (not np.isnan(ma50_full[i]) and not np.isnan(ma200_full[i]) and
-                        not np.isnan(ma50_full[i-1]) and not np.isnan(ma200_full[i-1])):
-                        if ma50_full[i-1] <= ma200_full[i-1] and ma50_full[i] > ma200_full[i]:
+                    if (not np.isnan(ma75_full[i]) and not np.isnan(ma200_full[i]) and
+                        not np.isnan(ma75_full[i-1]) and not np.isnan(ma200_full[i-1])):
+                        if ma75_full[i-1] <= ma200_full[i-1] and ma75_full[i] > ma200_full[i]:
                             golden_cross = True
-                        if ma50_full[i-1] >= ma200_full[i-1] and ma50_full[i] < ma200_full[i]:
+                        if ma75_full[i-1] >= ma200_full[i-1] and ma75_full[i] < ma200_full[i]:
                             death_cross = True
                 
                 results['golden_cross_recent'] = golden_cross
@@ -126,6 +290,8 @@ class TechnicalIndicatorCalculator:
         else:
             results['ma200'] = None
             results['price_above_ma200'] = None
+            results['ma200_slope_20d'] = None
+            results['ma200_slope_up'] = None
             results['golden_cross_recent'] = False
             results['death_cross_recent'] = False
         
@@ -162,7 +328,20 @@ class TechnicalIndicatorCalculator:
             results['macd_bull_cross'] = False
             results['macd_bear_cross'] = False
         
-        # RSI
+        # Short RSI for T+1 prediction
+        if len(self.close) >= 3:
+            rsi_2d = talib.RSI(self.close, timeperiod=2)
+            results['rsi_2d'] = self.safe_float(rsi_2d[-1])
+        else:
+            results['rsi_2d'] = None
+        
+        if len(self.close) >= 4:
+            rsi_3d = talib.RSI(self.close, timeperiod=3)
+            results['rsi_3d'] = self.safe_float(rsi_3d[-1])
+        else:
+            results['rsi_3d'] = None
+        
+        # RSI-14 (standard)
         if len(self.close) >= 14:
             rsi = talib.RSI(self.close, timeperiod=14)
             results['rsi_14d'] = self.safe_float(rsi[-1])
@@ -178,9 +357,21 @@ class TechnicalIndicatorCalculator:
         # ADX (Trend Strength)
         if len(self.close) >= 14:
             adx = talib.ADX(self.high, self.low, self.close, timeperiod=14)
-            results['adx_14d'] = self.safe_float(adx[-1])
+            adx_val = self.safe_float(adx[-1])
+            results['adx_14d'] = adx_val
+            
+            # ROBUST z-score for ADX using median/MAD
+            lookback = min(252, len(adx) - 1)
+            if lookback >= 50 and adx_val is not None:
+                hist_adx = adx[-lookback-1:-1]
+                hist_adx = hist_adx[~np.isnan(hist_adx)]
+                z = self.robust_zscore(adx_val, hist_adx)
+                results['adx_14d_zscore'] = self.safe_float(z) if z is not None else None
+            else:
+                results['adx_14d_zscore'] = None
         else:
             results['adx_14d'] = None
+            results['adx_14d_zscore'] = None
         
         return results
     
@@ -240,6 +431,26 @@ class TechnicalIndicatorCalculator:
             realized_vol_252d = np.std(returns_252d, ddof=1) * np.sqrt(252)
             results['realized_vol_252d'] = self.safe_float(realized_vol_252d)
             
+            # ROBUST z-score for realized vol using median/MAD
+            # Calculate rolling 252d vol for each of the last 252 days
+            if len(self.close) >= 505:  # Need 252 + 252 + 1 for z-score history
+                hist_vols = []
+                for i in range(252):
+                    end_idx = -(i + 1)
+                    start_idx = end_idx - 252
+                    if abs(start_idx) <= len(self.close):
+                        hist_returns = np.diff(np.log(self.close[start_idx:end_idx]))
+                        if len(hist_returns) >= 252:
+                            hist_vol = np.std(hist_returns, ddof=1) * np.sqrt(252)
+                            if not np.isnan(hist_vol):
+                                hist_vols.append(hist_vol)
+                
+                hist_vols_arr = np.array(hist_vols)
+                z = self.robust_zscore(realized_vol_252d, hist_vols_arr)
+                results['realized_vol_252d_zscore'] = self.safe_float(z) if z is not None else None
+            else:
+                results['realized_vol_252d_zscore'] = None
+            
             # Vol ratio
             if results['realized_vol_21d'] is not None and realized_vol_252d > 0:
                 results['vol_ratio_21v252'] = results['realized_vol_21d'] / realized_vol_252d
@@ -247,6 +458,7 @@ class TechnicalIndicatorCalculator:
                 results['vol_ratio_21v252'] = None
         else:
             results['realized_vol_252d'] = None
+            results['realized_vol_252d_zscore'] = None
             results['vol_ratio_21v252'] = None
         
         # ATR (Average True Range)
@@ -264,28 +476,77 @@ class TechnicalIndicatorCalculator:
             results['atr_14d'] = None
             results['atr_14d_pct'] = None
         
-        # Volatility Regime Classification
-        results['vol_regime'] = self._classify_vol_regime(
-            results.get('realized_vol_252d'),
-            results.get('realized_vol_21d')
-        )
+        # Volatility Regime Classification (uses percentiles of stock's own history)
+        vol_regime_result = self._classify_vol_regime_percentile()
+        results['vol_regime'] = vol_regime_result['regime']
+        results['vol_percentile'] = vol_regime_result['percentile']
         
         # results['IV_rank'] = None
         
         return results
     
+    def _classify_vol_regime_percentile(self) -> Dict[str, Any]:
+        """
+        Classify volatility regime using percentiles of stock's own volatility history.
+        
+        Calculates rolling 21-day realized vol for last 252 days, then determines
+        where current vol sits in that distribution.
+        
+        Returns:
+            {
+                'regime': 'high' | 'neutral' | 'low',
+                'percentile': float (0-100)
+            }
+        """
+        # Need at least 252 + 21 days of data for meaningful percentile
+        min_required = 273
+        if len(self.close) < min_required:
+            return {'regime': 'neutral', 'percentile': 50.0}
+        
+        # Calculate current 21-day realized vol
+        current_returns = np.diff(np.log(self.close[-22:]))
+        current_vol = np.std(current_returns, ddof=1) * np.sqrt(252)
+        
+        # Calculate rolling 21-day vol for past 252 days
+        historical_vols = []
+        for i in range(252):
+            end_idx = -(i + 1)
+            start_idx = end_idx - 21
+            if abs(start_idx) <= len(self.close):
+                hist_returns = np.diff(np.log(self.close[start_idx:end_idx]))
+                if len(hist_returns) >= 20:
+                    hist_vol = np.std(hist_returns, ddof=1) * np.sqrt(252)
+                    if not np.isnan(hist_vol):
+                        historical_vols.append(hist_vol)
+        
+        if len(historical_vols) < 50:
+            return {'regime': 'neutral', 'percentile': 50.0}
+        
+        # Calculate percentile of current vol in historical distribution
+        historical_vols = np.array(historical_vols)
+        percentile = (np.sum(historical_vols < current_vol) / len(historical_vols)) * 100
+        
+        # Classify regime based on percentile
+        if percentile >= 80:
+            regime = 'high'
+        elif percentile <= 20:
+            regime = 'low'
+        else:
+            regime = 'neutral'
+        
+        return {'regime': regime, 'percentile': self.safe_float(percentile)}
+    
     def _classify_vol_regime(self, vol_252d: Optional[float], vol_21d: Optional[float]) -> str:
         """
-        Classify volatility regime as high, neutral, or low.
-        Uses 252-day vol and recent vol spike.
+        DEPRECATED: Use _classify_vol_regime_percentile instead.
+        Kept for backward compatibility.
         """
         if vol_252d is None:
             return "neutral"
         
-        # Simple classification based on annualized vol levels
-        if vol_252d > 0.35:  # > 35% annualized
+        if vol_252d > 0.35:
             return "high"
-        elif vol_252d < 0.15:  # < 15% annualized
+        elif vol_252d < 0.15:
             return "low"
         else:
             return "neutral"
@@ -359,7 +620,8 @@ class TechnicalIndicatorCalculator:
                 results['sortino_1y'] = None
             
             # Maximum Drawdown
-            cumulative = np.cumprod(1 + returns)
+            # Note: returns are log returns, so use exp(cumsum) not cumprod(1+returns)
+            cumulative = np.exp(np.cumsum(returns))
             running_max = np.maximum.accumulate(cumulative)
             drawdown = (cumulative - running_max) / running_max
             max_dd = np.min(drawdown)
@@ -589,8 +851,52 @@ class TechnicalIndicatorCalculator:
     def calculate_price_events(self) -> Dict[str, Any]:
         """
         Detect gaps, 52-week highs/lows, and price structure breaks.
+        Also includes intraday features for T+1 prediction.
         """
         results = {}
+        
+        # Intraday/range features for T+1 prediction
+        if len(self.close) >= 1:
+            # Intraday return: close/open - 1
+            intraday_ret = (self.close[-1] / self.open[-1]) - 1.0
+            results['intraday_ret'] = self.safe_float(intraday_ret)
+            
+            # Range percent: (high - low) / close
+            range_pct = (self.high[-1] - self.low[-1]) / self.close[-1]
+            results['range_pct'] = self.safe_float(range_pct)
+            
+            # Calculate ROBUST z-scores using median/MAD
+            lookback = min(252, len(self.close) - 1)
+            if lookback >= 50:
+                # Historical intraday returns
+                hist_intraday = (self.close[-lookback-1:-1] / self.open[-lookback-1:-1]) - 1.0
+                z_intraday = self.robust_zscore(intraday_ret, hist_intraday)
+                results['intraday_ret_zscore'] = self.safe_float(z_intraday) if z_intraday is not None else None
+                
+                # Historical range percentages
+                hist_range = (self.high[-lookback-1:-1] - self.low[-lookback-1:-1]) / self.close[-lookback-1:-1]
+                z_range = self.robust_zscore(range_pct, hist_range)
+                results['range_pct_zscore'] = self.safe_float(z_range) if z_range is not None else None
+            else:
+                results['intraday_ret_zscore'] = None
+                results['range_pct_zscore'] = None
+        else:
+            results['intraday_ret'] = None
+            results['range_pct'] = None
+            results['intraday_ret_zscore'] = None
+            results['range_pct_zscore'] = None
+        
+        # Close location in 10-day range [0, 1]
+        if len(self.close) >= 10:
+            high_10d = np.max(self.high[-10:])
+            low_10d = np.min(self.low[-10:])
+            if high_10d > low_10d:
+                close_loc = (self.close[-1] - low_10d) / (high_10d - low_10d)
+                results['close_loc_10d'] = self.safe_float(np.clip(close_loc, 0.0, 1.0))
+            else:
+                results['close_loc_10d'] = 0.5  # No range, assume middle
+        else:
+            results['close_loc_10d'] = None
         
         # Gap detection (compare today's open to yesterday's close)
         if len(self.close) >= 2:
@@ -601,10 +907,22 @@ class TechnicalIndicatorCalculator:
             results['gap_up'] = self.safe_bool(gap_pct > 0.02)  # > 2% gap
             results['gap_down'] = self.safe_bool(gap_pct < -0.02)  # < -2% gap
             results['gap_size_pct'] = self.safe_float(gap_pct)
+            
+            # ROBUST z-score for gap size using median/MAD
+            lookback = min(252, len(self.close) - 2)
+            if lookback >= 50:
+                # Calculate historical gaps
+                hist_gaps = (self.open[-lookback-1:-1] - self.close[-lookback-2:-2]) / self.close[-lookback-2:-2]
+                hist_gaps = hist_gaps[~np.isnan(hist_gaps)]
+                z = self.robust_zscore(gap_pct, hist_gaps)
+                results['gap_size_zscore'] = self.safe_float(z) if z is not None else None
+            else:
+                results['gap_size_zscore'] = None
         else:
             results['gap_up'] = False
             results['gap_down'] = False
             results['gap_size_pct'] = 0.0
+            results['gap_size_zscore'] = None
         
         # 52-week high/low
         if len(self.close) >= 252:

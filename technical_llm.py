@@ -7,17 +7,19 @@ import httpx
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEFAULT_MODEL = "deepseek-chat"
-DEFAULT_TEMPERATURE = 0.5
+DEFAULT_TEMPERATURE = 1.0
 MAX_TOKENS = 800
 REQUEST_TIMEOUT = 30.0
 
-SYSTEM_PROMPT = """You are the best technical analysis agent evaluating stocks for a 1-WEEK FORWARD (5 trading days) horizon. Your IQ is unmatched.
+SYSTEM_PROMPT = """
+You are the best technical analysis agent evaluating stocks for a 1-WEEK FORWARD (5 trading days) horizon. Your IQ is unmatched.
 
 STRICT CONSTRAINTS
-- Use ONLY the numeric fields provided in DATA.
-- DO NOT invent, infer, or assume any data.
-- DO NOT reference any other knowledge: news, fundamentals, macro, or narratives.
-- If required liquidity or executability gates fail, you MUST force:
+- Use ONLY the fields provided in DATA (both numeric and categorical).
+- DO NOT invent, infer, or assume any data not explicitly provided.
+- DO NOT reference any other knowledge: news, fundamentals, macro events, or narratives.
+- time_id (if present) is an opaque identifier. DO NOT attempt to infer calendar dates or historical events.
+- If exec_gates.liquidity_ok is false, you MUST force:
   tone = "neutral", score = 0, suggested_action = "hold".
 
 TIME HORIZON PRIORITIES (1-WEEK)
@@ -40,33 +42,32 @@ INTERPRETATION RULES
   - Momentum + trend + volume alignment increases conviction.
 
 SCORING DISCIPLINE (IMPORTANT)
-- If composite or master scores are present in DATA, treat them as the BASE signal.
-- Your score must be in [-1, 1] and suitable for cross-sectional ranking.
-- You may adjust the base signal by at most ±0.2 due to:
-  - Volatility regime
-  - Signal conflict
-  - Lack of volume confirmation
-- Large score changes MUST be justified explicitly in key_reasons.
+- score MUST be in [-1.0, 1.0] using increments of 0.01 only.
+  Valid values: -1.0, -0.99, ..., -0.01, 0.0, 0.01, ..., 0.99, 1.0
+- Think of score magnitude as a probability-style edge over a 50/50 outcome
+- DO NOT default to the same score across different inputs. If evidence differs materially, choose a different bucket.
+- Adjust score based on:
+  - Volatility regime (high or rising volatility reduces allowable score magnitude)
+  - Signal conflict (divergences reduce allowable score magnitude)
+  - Lack of volume confirmation (caps score magnitude)
 
 CONFIDENCE GUIDELINES
 - Confidence ∈ [0, 1] reflects uncertainty, NOT strength alone.
 - Reduce confidence materially when:
   - Volatility is high or spiking
-  - Signals conflict (e.g., momentum vs trend divergence)
+  - Signals conflict (e.g., momentum vs tr hend divergence)
   - Volume confirmation is weak
 - High confidence requires:
   - Momentum + trend alignment
   - Acceptable volatility regime
-  - Passing liquidity filters
+  - Strong volume confirmation
 
 OUTPUT FORMAT (STRICT)
 Output MUST be valid JSON matching EXACTLY this schema:
 
 {
-  "symbol": "string",
-  "asof": "YYYY-MM-DD",
   "tone": "bullish or bearish or neutral",
-  "score": <number between -1 and 1>,
+  "score": <number between -1 and 1, increments of 0.1>,
   "summary": "Brief 2–3 sentence technical summary",
   "key_reasons": [
     {
@@ -76,46 +77,54 @@ Output MUST be valid JSON matching EXACTLY this schema:
     }
   ],
   "risk_flags": [
-    "drawdown",
-    "high_vol",
-    "weak_rs",
-    "overbought",
-    "illiquidity",
-    "signal_conflict",
-    "gap_risk"
+    "drawdown", "high_vol", "weak_rs", "overbought", 
+    "illiquidity", "signal_conflict", "gap_risk"
   ],
-  "liquidity_ok": <boolean from input>,
-  "min_exec_checks": {
-    "min_dollar_volume_filter": <boolean>,
-    "min_liquidity_score_filter": <boolean>
-  },
   "suggested_action": "long or short or hold",
-  "hold_period_days": 7,
   "confidence": <number between 0 and 1>
 }
 
+DO NOT include symbol, asof, liquidity_ok, min_exec_checks, or hold_period_days in your output.
+Those fields are added by the calling system.
+
 FINAL ENFORCEMENT
-- If liquidity_ok is false OR any min_exec_check is false:
+- If exec_gates.liquidity_ok is false OR any gate check fails:
   - tone = "neutral"
-  - score = 0
+  - score = 0.0
   - suggested_action = "hold"
+  - confidence = 0.1
 """
+
+LLM_OUTPUT_SCHEMA = {
+    "tone": "bullish | bearish | neutral",
+    "score": "number [-1, 1]",
+    "summary": "string (max 500 chars)",
+    "key_reasons": [
+        {"category": "momentum|trend|volatility|liquidity|events|relative", 
+         "field": "string", 
+         "evidence": "string"}
+    ],
+    "risk_flags": [
+        "drawdown", "high_vol", "weak_rs", "overbought", 
+        "illiquidity", "signal_conflict", "gap_risk"
+    ],
+    "suggested_action": "long|short|hold",
+    "confidence": "number [0, 1]"
+}
 
 OUTPUT_SCHEMA = {
     "symbol": "string",
     "asof": "ISO-8601",
     "tone": "bullish | bearish | neutral",
-    "score": "number",
+    "score": "number [-1, 1]",
     "summary": "string",
-    "key_reasons": [
-        {"category": "momentum|trend|volatility|liquidity|events|relative", "field": "string", "evidence": "string"}
-    ],
-    "risk_flags": ["drawdown|high_vol|gap_down|weak_rs|overbought|illiquidity"],
+    "key_reasons": [dict],
+    "risk_flags": [str],
     "liquidity_ok": "boolean",
     "min_exec_checks": {"min_dollar_volume_filter": "boolean", "min_liquidity_score_filter": "boolean"},
     "suggested_action": "long|short|hold",
     "hold_period_days": 7,
-    "confidence": "number"
+    "confidence": "number [0, 1]"
 }
 
 
@@ -174,12 +183,13 @@ def compute_fallback_score(input_data: Dict[str, Any]) -> float:
     return 0.0
 
 
-def analyze_technical_json(indicators: Dict[str, Any]) -> Dict[str, Any]:
+def analyze_technical_json(indicators: Dict[str, Any], mask_date: bool = False) -> Dict[str, Any]:
     """
     Synchronous wrapper for LLM analysis.
     
     Args:
         indicators: Technical indicators dictionary
+        mask_date: If True, replace real date with opaque ID
     
     Returns:
         {
@@ -190,7 +200,7 @@ def analyze_technical_json(indicators: Dict[str, Any]) -> Dict[str, Any]:
         }
     """
     try:
-        result = asyncio.run(run_technical_llm(indicators))
+        result = asyncio.run(run_technical_llm(indicators, mask_date=mask_date))
         return {
             "score": result.get("score", 0.0),
             "confidence": result.get("confidence", 0.5),
@@ -209,7 +219,8 @@ def analyze_technical_json(indicators: Dict[str, Any]) -> Dict[str, Any]:
 async def run_technical_llm(
     input_data: dict,
     model: str = DEFAULT_MODEL,
-    temperature: float = DEFAULT_TEMPERATURE
+    temperature: float = DEFAULT_TEMPERATURE,
+    mask_date: bool = False
 ) -> dict:
     """
     Send technical JSON to DeepSeek and return strictly-validated verdict.
@@ -218,42 +229,83 @@ async def run_technical_llm(
         input_data: Technical indicators from calculate_all_indicators.py
         model: DeepSeek model name (default: "deepseek-chat")
         temperature: Sampling temperature
+        mask_date: If True, replace real date with opaque ID for backtesting
     
     Returns:
         Validated verdict dictionary matching OUTPUT_SCHEMA
     """
     api_key = get_deepseek_api_key()
     
-    # Extract metadata from flat structure
     symbol = input_data.get("id", {}).get("symbol", "UNKNOWN")
     asof = input_data.get("asof", "")
     vol_regime = input_data.get("volatility", {}).get("vol_regime", "unknown")
+    
+    if mask_date and asof:
+        asof_id = f"t_{abs(hash(asof)) % 100000:05d}"
+    else:
+        asof_id = None
     
     # Extract liquidity checks
     volume_liquidity = input_data.get("volume_liquidity", {})
     avg_dollar_vol = volume_liquidity.get("avg_dollar_vol_21d", 0)
     liquidity_score = volume_liquidity.get("liquidity_score_0_100", 0)
     
-    # Determine liquidity status
     liquidity_ok = (avg_dollar_vol >= 10_000_000 and liquidity_score >= 50)
     min_dollar_filter = avg_dollar_vol >= 10_000_000
     min_liquidity_filter = liquidity_score >= 50
     
-    # Build user message with context
-    user_content = f"""Analyze this stock for 1-week forward horizon:
+    llm_input = {
+        **input_data,
+        "exec_gates": {
+            "liquidity_ok": liquidity_ok,
+            "min_dollar_volume_filter": min_dollar_filter,
+            "min_liquidity_score_filter": min_liquidity_filter
+        }
+    }
+    
+    if mask_date:
+        llm_input.pop("asof", None)
+        if asof_id:
+            llm_input["time_id"] = asof_id
+    
+    if mask_date:
+        user_content = f"""Analyze this stock for 1-week forward horizon:
+
+Symbol: {symbol}
+Time ID: {asof_id}
+Volatility Regime: {vol_regime}
+
+Execution Gates (liquidity filters - DO NOT modify):
+- liquidity_ok: {liquidity_ok}
+- min_dollar_volume_filter: {min_dollar_filter}
+- min_liquidity_score_filter: {min_liquidity_filter}
+- Avg Dollar Volume (21d): ${avg_dollar_vol:,.0f}
+- Liquidity Score: {liquidity_score:.1f}/100
+
+Technical Indicators:
+{json.dumps(llm_input, ensure_ascii=False, indent=2)}
+
+Return JSON per OUTPUT_SCHEMA with: tone, score, summary, key_reasons, risk_flags, suggested_action, confidence.
+Do NOT include: symbol, asof, liquidity_ok, min_exec_checks, hold_period_days (added by system)."""
+    else:
+        user_content = f"""Analyze this stock for 1-week forward horizon:
 
 Symbol: {symbol}
 Date: {asof}
 Volatility Regime: {vol_regime}
 
-Liquidity Check: {"PASS" if liquidity_ok else "FAIL"}
+Execution Gates (liquidity filters - DO NOT modify):
+- liquidity_ok: {liquidity_ok}
+- min_dollar_volume_filter: {min_dollar_filter}
+- min_liquidity_score_filter: {min_liquidity_filter}
 - Avg Dollar Volume (21d): ${avg_dollar_vol:,.0f}
 - Liquidity Score: {liquidity_score:.1f}/100
 
 Technical Indicators:
-{json.dumps(input_data, ensure_ascii=False, indent=2)}
+{json.dumps(llm_input, ensure_ascii=False, indent=2)}
 
-Return JSON with: tone, score, summary, key_reasons, risk_flags, confidence"""
+Return JSON per OUTPUT_SCHEMA with: tone, score, summary, key_reasons, risk_flags, suggested_action, confidence.
+Do NOT include: symbol, asof, liquidity_ok, min_exec_checks, hold_period_days (added by system)."""
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -285,12 +337,10 @@ Return JSON with: tone, score, summary, key_reasons, risk_flags, confidence"""
             content = result["choices"][0]["message"]["content"]
             raw_output = json.loads(content)
             
-            # Build validated output with correct structure
             score = float(raw_output.get("score", 0.0))
             confidence = float(raw_output.get("confidence", 0.5))
             tone = raw_output.get("tone", "neutral")
             
-            # Force neutral if liquidity fails
             if not liquidity_ok:
                 score = 0.0
                 tone = "neutral"
@@ -334,7 +384,6 @@ Return JSON with: tone, score, summary, key_reasons, risk_flags, confidence"""
                 content = result["choices"][0]["message"]["content"]
                 raw_output = json.loads(content)
                 
-                # Build validated output
                 score = float(raw_output.get("score", 0.0))
                 confidence = float(raw_output.get("confidence", 0.5))
                 tone = raw_output.get("tone", "neutral")
@@ -365,7 +414,6 @@ Return JSON with: tone, score, summary, key_reasons, risk_flags, confidence"""
             except Exception as retry_error:
                 print(f"Error: Retry also failed: {retry_error}")
                 
-                # Return minimal fallback
                 return {
                     "symbol": symbol,
                     "asof": asof,
