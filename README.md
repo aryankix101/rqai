@@ -1,16 +1,16 @@
 composite_scores.py
 
-Purpose: Calculates composite scores for momentum, trend, relative strength (RS), volume, and risk. Combines them into Tier-1 scores and alpha signals for next-day predictions.
+Purpose: Calculates composite scores for momentum, trend, relative strength, volume, and risk. Combines them into Tier-1 scores and alpha signals for next-day predictions.
 Dependencies: technical_indicators_calculator.py (for indicators), regime_classifier.py (for regime-aware weighting).
 
 technical_indicators_calculator.py
 
 Purpose: Computes technical indicators from OHLCV data.
-Inputs: Pandas DataFrame with OHLCV columns (Open, High, Low, Close, Volume). Foundation for all scoring. Warmup period (252 days) required for accurate indicators. 
+Inputs: Pandas DataFrame with OHLCV columns. Foundation for all scoring. Warmup period (252 days) required for accurate indicators. 
 
 deterministic_scoring.py
 
-Purpose: Combines composite scores into regime-aware Tier-1 master scores. Adjusts weights based on market conditions (e.g., more risk in downtrends).
+Purpose: Combines composite scores into regime-aware Tier-1 master scores. Adjusts weights based on market conditions.
 Key Functions/Outputs:
 calculate_tier1_master_score() → Tier-1 score (-1 to +1), quality (average of composites), and regime.
 Inputs: Composites dict from composite_scores.py, regime from regime_classifier.py.
