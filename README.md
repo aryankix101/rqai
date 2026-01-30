@@ -33,7 +33,7 @@ Simulates real trading with slippage/commission. Use for stock-specific tuning.
 
 feature_diagnostics.py
 
-Purpose: Analyzes feature distributions, saturation, correlations, and non-linear relationships to identify issues (e.g., weak signals).
+Purpose: Analyzes feature distributions, saturation, correlations, and non-linear relationships to identify issues.
 Notes: Flags problems like "alpha score always 0". Run after signal changes.
 
 signal_feature_pipeline.py
