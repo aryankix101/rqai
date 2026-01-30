@@ -4,14 +4,27 @@ Hit Rate Validator for Technical Indicators
 
 Validates that technical indicators have >52% hit rate before deploying LLM layer.
 
+TRADING LOGIC:
+- Signal computed DAILY at close (using all data up to EOD)
+- Entry = Next trading day OPEN
+- Exit = SAME day CLOSE (intraday only)
+- Return = (Close / Open) - 1.0 on entry day
+
+Example: Monday signal → Tuesday open entry → Tuesday close exit
+
+This measures:
+- Pure INTRADAY follow-through (no overnight exposure)
+- Tests if Monday's signal predicts Tuesday's intraday direction
+- Cleanest validation metric (no gap risk)
+
 Key Concepts:
 - Hit Rate = (Signals with Positive Forward Return) / (Total Signals Generated)
 - Tests on mini-universe of stocks
-- Avoids look-ahead bias: Uses T data to predict T+1
+- Avoids look-ahead bias: Uses Thursday data to predict Friday→Monday return
 
 Process:
-1. Generate binary signals from technical indicators
-2. Calculate forward returns (T+1, T+3, T+5 days)
+1. Generate binary signals from technical indicators (using Thursday data)
+2. Calculate forward returns (Friday open → Monday open)
 3. Calculate hit rate for each configuration
 """
 
@@ -43,8 +56,8 @@ from deterministic_scoring import calculate_tier1_master_score
 from regime_classifier import classify_market_regime
 
 
-# Mini-universe for validation
-MINI_UNIVERSE = ['TSLA']
+# Stock validation
+MINI_UNIVERSE = ['T']
 
 
 @dataclass
@@ -56,13 +69,44 @@ class SignalResult:
     signal_strength: float  # Underlying tier1 score
     # New: Next-Day Alpha signal
     alpha_signal: int  # 1 = LONG, 0 = HOLD, -1 = SHORT (from next_day_alpha)
-    alpha_score: float  # next_day_alpha score
+    alpha_score: float  # next_day_alpha raw score
+    alpha_score_scaled: float  # temperature-scaled alpha score
     alpha_regime: str  # mean_reversion, continuation, or mixed
     # Forward returns
     forward_return_1d: Optional[float]
     forward_return_3d: Optional[float]
     forward_return_5d: Optional[float]
     indicators: Dict[str, Any]
+
+
+# =============================================================================
+# Shared Utilities
+# =============================================================================
+
+def calculate_forward_return_label(
+    hist: pd.DataFrame,
+    signal_date: pd.Timestamp,
+    horizon: int = 1,
+    execution_model: str = "next_open_to_close"
+) -> Optional[float]:
+    """
+    Calculate forward return label for a given signal date and horizon.
+    
+    This is the centralized function used by all diagnostics to ensure
+    consistent return calculation between hit rate validation and 
+    factor analysis.
+    
+    Args:
+        hist: Price history DataFrame
+        signal_date: Date signal was generated
+        horizon: Trading days forward
+        execution_model: "close_to_close", "next_open_to_close", "next_open_to_next_open"
+    
+    Returns:
+        Forward return as decimal (0.01 = 1%), or None if not available
+    """
+    forward_rets = calculate_forward_returns(hist, signal_date, [horizon], execution_model)
+    return forward_rets.get(horizon)
 
 
 # =============================================================================
@@ -90,22 +134,78 @@ def generate_binary_signal(
 def calculate_forward_returns(
     hist: pd.DataFrame,
     signal_date: pd.Timestamp,
-    horizons: List[int] = [1, 3, 5]
+    horizons: List[int] = [1, 3, 5],
+    execution_model: str = "next_open_to_close"
 ) -> Dict[int, Optional[float]]:
-    """Calculate forward returns from signal date (avoiding look-ahead bias)."""
+    """
+    Calculate forward returns from signal date (avoiding look-ahead bias).
+    
+    EXECUTION MODELS:
+    - "close_to_close": Entry at signal_date close, exit at future close
+      Return = close(t+h) / close(t) - 1
+    - "next_open_to_close": Entry at next open, exit at same day close (intraday)
+      Return = close(t+h) / open(t+h) - 1  
+    - "next_open_to_next_open": Entry at next open, exit at next next open
+      Return = open(t+h+1) / open(t+h) - 1
+    
+    Args:
+        hist: Price history DataFrame
+        signal_date: Date signal was generated (using data up to this date)
+        horizons: Trading days forward to measure
+        execution_model: How to execute the trade
+    
+    Returns:
+        Dict of horizon -> return (decimal)
+    """
     if signal_date not in hist.index:
         return {h: None for h in horizons}
     
-    signal_price = hist.loc[signal_date, 'Close']
-    future_dates = hist.index[hist.index > signal_date]
-    
     returns = {}
+    
     for horizon in horizons:
-        if len(future_dates) >= horizon:
-            target_date = future_dates[horizon - 1]
-            target_price = hist.loc[target_date, 'Close']
-            returns[horizon] = (target_price / signal_price) - 1.0
-        else:
+        try:
+            if execution_model == "close_to_close":
+                # Entry: signal_date close, Exit: horizon days later close
+                if signal_date not in hist.index:
+                    returns[horizon] = None
+                    continue
+                    
+                future_dates = hist.index[hist.index > signal_date]
+                if len(future_dates) >= horizon:
+                    exit_date = future_dates[horizon - 1]
+                    entry_price = hist.loc[signal_date, 'Close']
+                    exit_price = hist.loc[exit_date, 'Close']
+                    returns[horizon] = (exit_price / entry_price) - 1.0 if entry_price > 0 else None
+                else:
+                    returns[horizon] = None
+                    
+            elif execution_model == "next_open_to_close":
+                # Entry: next open, Exit: same day close (current implementation)
+                future_dates = hist.index[hist.index > signal_date]
+                if len(future_dates) >= horizon:
+                    entry_date = future_dates[horizon - 1]
+                    entry_price = hist.loc[entry_date, 'Open']
+                    exit_price = hist.loc[entry_date, 'Close']
+                    returns[horizon] = (exit_price / entry_price) - 1.0 if entry_price > 0 else None
+                else:
+                    returns[horizon] = None
+                    
+            elif execution_model == "next_open_to_next_open":
+                # Entry: next open, Exit: next next open
+                future_dates = hist.index[hist.index > signal_date]
+                if len(future_dates) >= horizon + 1:  # Need one extra day
+                    entry_date = future_dates[horizon - 1]
+                    exit_date = future_dates[horizon]  # Next day
+                    entry_price = hist.loc[entry_date, 'Open']
+                    exit_price = hist.loc[exit_date, 'Open']
+                    returns[horizon] = (exit_price / entry_price) - 1.0 if entry_price > 0 else None
+                else:
+                    returns[horizon] = None
+                    
+            else:
+                raise ValueError(f"Unknown execution_model: {execution_model}")
+                
+        except (KeyError, IndexError):
             returns[horizon] = None
     
     return returns
@@ -144,7 +244,9 @@ def calculate_hit_rate(
             ret = None
         
         if ret is not None:
-            forward_returns.append(ret)
+            signal_direction = getattr(sig, signal_attr)
+            adjusted_ret = ret * signal_direction
+            forward_returns.append(adjusted_ret)
     
     if len(forward_returns) < min_signals:
         return {
@@ -159,13 +261,14 @@ def calculate_hit_rate(
     
     profitable = sum(1 for r in forward_returns if r > 0)
     hit_rate = profitable / len(forward_returns)
+    avg_return = np.mean(forward_returns)
     
     return {
         "hit_rate": hit_rate,
         "total_signals": len(filtered),
         "valid_signals": len(forward_returns),
         "profitable_signals": profitable,
-        "avg_return": np.mean(forward_returns),
+        "avg_return": avg_return,
         "median_return": np.median(forward_returns),
         "std_return": np.std(forward_returns),
         "status": "VALID" if hit_rate >= 0.52 else "BELOW_THRESHOLD"
@@ -179,9 +282,31 @@ def calculate_hit_rate(
 async def validate_single_stock(
     symbol: str,
     start_date: str = "1996-01-01",
-    end_date: str = "2025-01-01"
+    end_date: str = "2025-01-01",
+    execution_model: str = "next_open_to_close",
+    alpha_threshold_mode: str = "quantile",
+    q_long: float = 80.0,
+    q_short: float = 20.0
 ) -> Tuple[List[SignalResult], pd.DataFrame]:
-    """Generate signals and calculate forward returns for single stock."""
+    """
+    Generate signals and calculate forward returns for single stock.
+    
+    TIMING (as of 2026-01-24):
+    - Signal computed DAILY at close using all data up to that day
+    - Entry = Next trading day OPEN
+    - Exit = SAME day CLOSE (intraday only)
+    - Forward return = (Close / Open) - 1.0 on entry day
+    
+    Example:
+    - signal_date = Monday Jan 8 close
+    - Use data up to Monday Jan 8 close to compute indicators
+    - Entry = Tuesday Jan 9 open
+    - Exit = Tuesday Jan 9 close (same day)
+    - Return = (Tue Close / Tue Open) - 1.0 (intraday)
+    
+    This tests: "Does Monday's signal predict Tuesday's intraday direction?"
+    Signals generated EVERY trading day (~250/year).
+    """
     print(f"\n{'='*60}")
     print(f"Validating: {symbol}")
     print(f"{'='*60}")
@@ -192,14 +317,25 @@ async def validate_single_stock(
         print(f"Insufficient data for {symbol}")
         return [], pd.DataFrame()
     
-    # Get weekly rebalance dates
-    weekly_dates = hist.resample('W-FRI').last().dropna(subset=['Close']).index
+    # Fetch benchmark (SPY) data for relative strength calculation
+    spy_hist = fetch_tiingo_ohlcv("SPY", start_date, end_date)
+    benchmark_returns = {}
+    if spy_hist is not None and len(spy_hist) >= 252:
+        spy_calc = TechnicalIndicatorCalculator(spy_hist)
+        benchmark_returns = spy_calc.calculate_momentum()
+    
+    # Generate signals DAILY (not weekly) - true daily trading strategy
+    # Skip first 252 days for technical indicator warmup period
+    daily_dates = hist.index[252:]
     
     signals = []
+    historical_alpha_scores = []  # Track raw scores for temperature calculation
+    historical_scaled_scores = []  # Track scaled scores for quantile thresholds
     
-    for signal_date in weekly_dates[:-5]:  # Leave room for forward returns
-        prev_date = signal_date - timedelta(days=1)
-        hist_slice = hist[hist.index <= prev_date].copy()
+    for signal_date in daily_dates[:-5]:  # Leave room for forward returns
+        # Use data UP TO signal_date close to compute indicators
+        # Signal is computed at EOD, entry happens next day at open
+        hist_slice = hist[hist.index <= signal_date].copy()
         
         if len(hist_slice) < 200:
             continue
@@ -214,10 +350,11 @@ async def validate_single_stock(
                 'volatility': calc.calculate_volatility_indicators(),
                 'risk': calc.calculate_risk_indicators(),
                 'price_events': calc.calculate_price_events(),
-                'relative_strength': {}
+                'relative_strength': {},
+                'benchmark_returns': benchmark_returns
             }
             
-            # Calculate composite scores (including new next_day_alpha)
+            # Calculate composite scores
             composites = {
                 'momentum_composite': calculate_momentum_composite(indicators),
                 'trend_composite': calculate_trend_composite(indicators),
@@ -230,38 +367,69 @@ async def validate_single_stock(
             # Calculate regime
             regime = classify_market_regime(indicators)
             
-            # Calculate Tier-1 score (old method - keep for comparison)
             tier1_result = calculate_tier1_master_score(composites, regime)
             tier1_score = tier1_result['tier1_score']
             
-            # New: Next-Day Alpha score (T+1 focused) - pass tier1 for confirmation
             next_day_alpha_result = calculate_next_day_alpha_composite(
                 indicators,
-                tier1_score=tier1_score
+                tier1_context=tier1_result
             )
             next_day_alpha_score = next_day_alpha_result['score']
             next_day_decision = next_day_alpha_result['decision']
             next_day_regime = next_day_alpha_result['regime']
             tier1_confirmation = next_day_alpha_result.get('tier1_confirmation')
             
-            # Generate binary signals from both methods
-            # Old method: tier1_score
-            binary_signal = generate_binary_signal(tier1_score)
+            # Apply temperature scaling to alpha score for better distribution spread
+            if len(historical_alpha_scores) >= 60:  # Need minimum history
+                # Calculate rolling std of historical alpha scores (temperature)
+                rolling_scores = historical_alpha_scores[-252:] if len(historical_alpha_scores) >= 252 else historical_alpha_scores
+                temperature = max(0.05, np.std(rolling_scores))
+                
+                # Apply tanh scaling: spreads out small values, compresses large ones
+                alpha_score_scaled = np.tanh(next_day_alpha_score / temperature)
+            else:
+                # Fallback during warmup
+                alpha_score_scaled = next_day_alpha_score
             
-            # New method: next_day_alpha decision
-            alpha_signal = 1 if next_day_decision == 'LONG' else (-1 if next_day_decision == 'SHORT' else 0)
+            # Track historical scores
+            historical_alpha_scores.append(next_day_alpha_score)
+            historical_scaled_scores.append(alpha_score_scaled)
             
-            # Track signals if EITHER method gives a non-neutral signal
-            if binary_signal != 0 or alpha_signal != 0:
-                forward_rets = calculate_forward_returns(hist, signal_date, [1, 3, 5])
+            # Generate tier-1 signal using fixed thresholds on tier1_score
+            tier1_signal = generate_binary_signal(tier1_score)
+            
+            # Generate alpha signal using quantile-based thresholds
+            if alpha_threshold_mode == "quantile" and len(historical_scaled_scores) >= 60:  # Need minimum history for quantiles
+                # Use rolling window of last 252 trading days (1 year) for quantiles on scaled scores
+                rolling_scaled = historical_scaled_scores[-252:] if len(historical_scaled_scores) >= 252 else historical_scaled_scores
+                q_long_threshold = np.percentile(rolling_scaled, q_long)   # q_long percentile for long
+                q_short_threshold = np.percentile(rolling_scaled, q_short)  # q_short percentile for short
+                
+                if alpha_score_scaled >= q_long_threshold:
+                    alpha_signal = 1  # LONG
+                elif alpha_score_scaled <= q_short_threshold:
+                    alpha_signal = -1  # SHORT
+                else:
+                    alpha_signal = 0  # HOLD
+            elif alpha_threshold_mode == "fixed":
+                # Use original decision-based logic with fixed thresholds
+                alpha_signal = 1 if next_day_decision == 'LONG' else (-1 if next_day_decision == 'SHORT' else 0)
+            else:
+                # Fallback during warmup period
+                alpha_signal = 1 if next_day_decision == 'LONG' else (-1 if next_day_decision == 'SHORT' else 0)
+            
+            # Track signals - use tier-1 signal for the main signal, alpha for comparison
+            if tier1_signal != 0 or alpha_signal != 0:
+                forward_rets = calculate_forward_returns(hist, signal_date, [1, 3, 5], execution_model)
                 
                 signal_result = SignalResult(
                     date=signal_date,
                     symbol=symbol,
-                    signal=binary_signal,
+                    signal=tier1_signal,
                     signal_strength=tier1_score,
                     alpha_signal=alpha_signal,
                     alpha_score=next_day_alpha_score,
+                    alpha_score_scaled=alpha_score_scaled,
                     alpha_regime=next_day_regime,
                     forward_return_1d=forward_rets[1],
                     forward_return_3d=forward_rets[3],
@@ -290,7 +458,11 @@ async def validate_single_stock(
 async def validate_mini_universe(
     symbols: List[str] = MINI_UNIVERSE,
     start_date: str = "1996-01-01",
-    end_date: str = "2025-01-01"
+    end_date: str = "2025-01-01",
+    execution_model: str = "next_open_to_close",
+    alpha_threshold_mode: str = "quantile",
+    q_long: float = 80.0,
+    q_short: float = 20.0
 ) -> Tuple[Dict[str, Any], List[SignalResult], Dict[str, List[SignalResult]]]:
     """
     Validate hit rates across mini-universe of stocks.
@@ -309,7 +481,15 @@ async def validate_mini_universe(
     stock_hist = {}  # symbol -> historical data for charting
     
     for symbol in symbols:
-        signals, hist = await validate_single_stock(symbol, start_date, end_date)
+        signals, hist = await validate_single_stock(
+            symbol, 
+            start_date, 
+            end_date, 
+            execution_model,
+            alpha_threshold_mode,
+            q_long,
+            q_short
+        )
         all_signals.extend(signals)
         stock_results[symbol] = signals
         stock_hist[symbol] = hist
@@ -702,7 +882,7 @@ def plot_factor_analysis(
         'Volume': [get_composite_score(s, 'volume_composite') for s in valid_signals],
         'Risk': [get_composite_score(s, 'risk_composite') for s in valid_signals],
         'RSI': [s.indicators.get('trend', {}).get('rsi_14d', 50) for s in valid_signals],
-        'ADX': [s.indicators.get('trend', {}).get('adx', 0) for s in valid_signals],
+        'ADX': [s.indicators.get('trend', {}).get('adx_14d', 0) for s in valid_signals],
         'MACD': [s.indicators.get('trend', {}).get('macd', 0) for s in valid_signals],
     }
     
@@ -1368,6 +1548,207 @@ def plot_method_comparison(
     plt.close('all')
 
 
+def plot_baseline_comparison(
+    all_signals: List[SignalResult],
+    stock_hist: Dict[str, pd.DataFrame],
+    output_dir: Path,
+    execution_model: str = "next_open_to_close"
+):
+    """
+    Compare signal performance vs market baseline (natural up/down day frequency).
+    Shows if signals are actually beating random chance.
+    """
+    if not all_signals:
+        print("No signals for baseline comparison")
+        return
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Signal Performance vs Market Baseline', fontsize=16, fontweight='bold')
+    
+    # Calculate baseline stats for each stock
+    baseline_stats = {}
+    for symbol, hist in stock_hist.items():
+        if hist is not None and len(hist) > 0:
+            # Calculate daily forward returns using same method as signals
+            daily_returns = []
+            for date in hist.index[:-1]:  # Exclude last date since we need forward returns
+                ret = calculate_forward_return_label(hist, date, horizon=1, execution_model=execution_model)
+                if ret is not None:
+                    daily_returns.append(ret)
+            
+            daily_returns = np.array(daily_returns)
+            baseline_stats[symbol] = {
+                'up_pct': (daily_returns > 0).sum() / len(daily_returns),
+                'down_pct': (daily_returns < 0).sum() / len(daily_returns),
+                'avg_up': daily_returns[daily_returns > 0].mean() if (daily_returns > 0).any() else 0,
+                'avg_down': daily_returns[daily_returns < 0].mean() if (daily_returns < 0).any() else 0,
+                'total_days': len(daily_returns)
+            }
+    
+    # Aggregate baseline (weighted by number of days)
+    total_days = sum(s['total_days'] for s in baseline_stats.values())
+    agg_up_pct = sum(s['up_pct'] * s['total_days'] for s in baseline_stats.values()) / total_days if total_days > 0 else 0
+    agg_down_pct = sum(s['down_pct'] * s['total_days'] for s in baseline_stats.values()) / total_days if total_days > 0 else 0
+    
+    # Calculate signal performance
+    long_signals = [s for s in all_signals if s.alpha_signal == 1 and s.forward_return_1d is not None]
+    short_signals = [s for s in all_signals if s.alpha_signal == -1 and s.forward_return_1d is not None]
+    
+    long_hr = (sum(1 for s in long_signals if s.forward_return_1d > 0) / len(long_signals)) if long_signals else 0
+    short_hr = (sum(1 for s in short_signals if s.forward_return_1d * -1 > 0) / len(short_signals)) if short_signals else 0  # Flip for shorts
+    
+    # Chart 1: Up/Down Day Frequency
+    ax1 = axes[0, 0]
+    x = np.arange(2)
+    width = 0.35
+    
+    baseline_vals = [agg_up_pct * 100, agg_down_pct * 100]
+    signal_vals = [long_hr * 100, short_hr * 100]
+    
+    bars1 = ax1.bar(x - width/2, baseline_vals, width, label='Market Baseline', alpha=0.8, color='#95a5a6', edgecolor='black')
+    bars2 = ax1.bar(x + width/2, signal_vals, width, label='Signal Hit Rate', alpha=0.8, color=['#2ecc71', '#e74c3c'], edgecolor='black')
+    
+    ax1.axhline(y=50, color='black', linestyle='--', linewidth=1, alpha=0.5)
+    ax1.set_ylabel('Win Rate (%)', fontsize=11, fontweight='bold')
+    ax1.set_title('Signal Hit Rate vs Market Baseline', fontsize=12, fontweight='bold')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(['LONG\n(vs Up Days)', 'SHORT\n(vs Down Days)'])
+    ax1.legend()
+    ax1.grid(alpha=0.3, axis='y')
+    ax1.set_ylim([0, 100])
+    
+    # Add value labels
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2, height + 2,
+                    f'{height:.1f}%', ha='center', fontsize=9, fontweight='bold')
+    
+    # Add edge calculation
+    long_edge = signal_vals[0] - baseline_vals[0]
+    short_edge = signal_vals[1] - baseline_vals[1]
+    ax1.text(0.02, 0.98, f'LONG Edge: {long_edge:+.1f}%\nSHORT Edge: {short_edge:+.1f}%',
+            transform=ax1.transAxes, fontsize=10, fontweight='bold',
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.3))
+    
+    # Chart 2: Signal Count vs Available Opportunities
+    ax2 = axes[0, 1]
+    
+    total_up_days = sum(s['total_days'] * s['up_pct'] for s in baseline_stats.values())
+    total_down_days = sum(s['total_days'] * s['down_pct'] for s in baseline_stats.values())
+    
+    opportunity_counts = [total_up_days, total_down_days]
+    signal_counts = [len(long_signals), len(short_signals)]
+    
+    x = np.arange(2)
+    bars1 = ax2.bar(x - width/2, opportunity_counts, width, label='Available Opportunities', alpha=0.8, color='#3498db', edgecolor='black')
+    bars2 = ax2.bar(x + width/2, signal_counts, width, label='Signals Fired', alpha=0.8, color=['#2ecc71', '#e74c3c'], edgecolor='black')
+    
+    ax2.set_ylabel('Count', fontsize=11, fontweight='bold')
+    ax2.set_title('Signal Selectivity', fontsize=12, fontweight='bold')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(['LONG\nOpportunities', 'SHORT\nOpportunities'])
+    ax2.legend()
+    ax2.grid(alpha=0.3, axis='y')
+    
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2, height + max(opportunity_counts)*0.02,
+                    f'{int(height)}', ha='center', fontsize=9, fontweight='bold')
+    
+    # Add selectivity %
+    long_sel = (len(long_signals) / total_up_days * 100) if total_up_days > 0 else 0
+    short_sel = (len(short_signals) / total_down_days * 100) if total_down_days > 0 else 0
+    ax2.text(0.02, 0.98, f'LONG Selectivity: {long_sel:.1f}%\nSHORT Selectivity: {short_sel:.1f}%',
+            transform=ax2.transAxes, fontsize=10, fontweight='bold',
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
+    
+    # Chart 3: Average Return Comparison
+    ax3 = axes[1, 0]
+    
+    avg_long_ret = np.mean([s.forward_return_1d * 100 for s in long_signals]) if long_signals else 0
+    avg_short_ret = np.mean([s.forward_return_1d * -100 for s in short_signals]) if short_signals else 0  # Flip for shorts
+    
+    avg_up_day = sum(s['avg_up'] * s['total_days'] * s['up_pct'] for s in baseline_stats.values()) / sum(s['total_days'] * s['up_pct'] for s in baseline_stats.values()) * 100 if baseline_stats else 0
+    avg_down_day = sum(s['avg_down'] * s['total_days'] * s['down_pct'] for s in baseline_stats.values()) / sum(s['total_days'] * s['down_pct'] for s in baseline_stats.values()) * 100 if baseline_stats else 0
+    
+    baseline_rets = [avg_up_day, abs(avg_down_day)]  # Make down day positive for comparison
+    signal_rets = [avg_long_ret, avg_short_ret]
+    
+    x = np.arange(2)
+    bars1 = ax3.bar(x - width/2, baseline_rets, width, label='Market Baseline', alpha=0.8, color='#95a5a6', edgecolor='black')
+    bars2 = ax3.bar(x + width/2, signal_rets, width, label='Signal Avg Return', alpha=0.8, color=['#2ecc71', '#e74c3c'], edgecolor='black')
+    
+    ax3.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax3.set_ylabel('Average Return (%)', fontsize=11, fontweight='bold')
+    ax3.set_title('Return Magnitude: Signals vs Baseline', fontsize=12, fontweight='bold')
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(['LONG', 'SHORT'])
+    ax3.legend()
+    ax3.grid(alpha=0.3, axis='y')
+    
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax3.text(bar.get_x() + bar.get_width()/2, height + 0.05 if height > 0 else height - 0.15,
+                    f'{height:.2f}%', ha='center', fontsize=9, fontweight='bold')
+    
+    # Chart 4: Expectancy Comparison
+    ax4 = axes[1, 1]
+    
+    # Expectancy = Hit Rate * Avg Win - (1 - Hit Rate) * Avg Loss
+    baseline_long_exp = (agg_up_pct * avg_up_day) * 100
+    baseline_short_exp = (agg_down_pct * abs(avg_down_day)) * 100
+    
+    signal_long_exp = avg_long_ret * (long_hr / 100) if long_hr > 0 else 0
+    signal_short_exp = avg_short_ret * (short_hr / 100) if short_hr > 0 else 0
+    
+    baseline_exps = [baseline_long_exp, baseline_short_exp]
+    signal_exps = [signal_long_exp, signal_short_exp]
+    
+    x = np.arange(2)
+    bars1 = ax4.bar(x - width/2, baseline_exps, width, label='Market Baseline', alpha=0.8, color='#95a5a6', edgecolor='black')
+    bars2 = ax4.bar(x + width/2, signal_exps, width, label='Signal Expectancy', alpha=0.8, color=['#2ecc71', '#e74c3c'], edgecolor='black')
+    
+    ax4.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax4.set_ylabel('Expected Return Per Trade (%)', fontsize=11, fontweight='bold')
+    ax4.set_title('Expectancy: Signals vs Random Entry', fontsize=12, fontweight='bold')
+    ax4.set_xticks(x)
+    ax4.set_xticklabels(['LONG', 'SHORT'])
+    ax4.legend()
+    ax4.grid(alpha=0.3, axis='y')
+    
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            color = 'green' if height > 0 else 'red'
+            ax4.text(bar.get_x() + bar.get_width()/2, height + 0.02 if height > 0 else height - 0.08,
+                    f'{height:.2f}%', ha='center', fontsize=9, fontweight='bold', color=color)
+    
+    plt.tight_layout()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_file = output_dir / f"baseline_comparison_{timestamp}.png"
+    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+    print(f"📊 Saved: {plot_file}")
+    
+    # Print summary
+    print("\n" + "="*60)
+    print("BASELINE vs SIGNAL COMPARISON")
+    print("="*60)
+    print(f"Market Baseline:")
+    print(f"  Up Days:   {agg_up_pct*100:.1f}% (avg: {avg_up_day:+.2f}%)")
+    print(f"  Down Days: {agg_down_pct*100:.1f}% (avg: {avg_down_day:.2f}%)")
+    print(f"\nSignal Performance:")
+    print(f"  LONG:  {long_hr*100:.1f}% hit rate, {avg_long_ret:+.2f}% avg (Edge: {long_edge:+.1f}%)")
+    print(f"  SHORT: {short_hr*100:.1f}% hit rate, {avg_short_ret:+.2f}% avg (Edge: {short_edge:+.1f}%)")
+    print(f"\nExpectancy:")
+    print(f"  LONG:  Signal={signal_long_exp:+.2f}% vs Random={baseline_long_exp:+.2f}%")
+    print(f"  SHORT: Signal={signal_short_exp:+.2f}% vs Random={baseline_short_exp:+.2f}%")
+    
+    plt.close('all')
+
+
 # =============================================================================
 # Main Execution
 # =============================================================================
@@ -1375,14 +1756,70 @@ def plot_method_comparison(
 async def main():
     """Run hit rate validation on mini-universe - pure signals only."""
     
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Hit Rate Validator for Technical Indicators")
+    parser.add_argument(
+        "--execution-model",
+        choices=["close_to_close", "next_open_to_close", "next_open_to_next_open"],
+        default="next_open_to_close",
+        help="How to execute trades for forward return calculation"
+    )
+    parser.add_argument(
+        "--alpha-threshold-mode",
+        choices=["fixed", "quantile"],
+        default="quantile",
+        help="How to determine alpha signal thresholds"
+    )
+    parser.add_argument(
+        "--q-long",
+        type=float,
+        default=80.0,
+        help="Long threshold quantile percentile (default: 80th percentile)"
+    )
+    parser.add_argument(
+        "--q-short", 
+        type=float,
+        default=20.0,
+        help="Short threshold quantile percentile (default: 20th percentile)"
+    )
+    parser.add_argument(
+        "--symbols",
+        nargs="*",
+        default=MINI_UNIVERSE,
+        help="Stock symbols to validate (default: MINI_UNIVERSE)"
+    )
+    parser.add_argument(
+        "--start-date",
+        default="1996-01-01",
+        help="Start date for validation"
+    )
+    parser.add_argument(
+        "--end-date", 
+        default="2025-01-01",
+        help="End date for validation"
+    )
+    
+    args = parser.parse_args()
+    
     print("\n" + "="*80)
     print("PURE SIGNAL HIT RATE VALIDATION")
+    print(f"Execution Model: {args.execution_model}")
+    print(f"Alpha Threshold Mode: {args.alpha_threshold_mode}")
+    if args.alpha_threshold_mode == "quantile":
+        print(f"Quantile Thresholds: Long={args.q_long}th percentile, Short={args.q_short}th percentile")
+    print(f"Symbols: {', '.join(args.symbols)}")
+    print(f"Period: {args.start_date} to {args.end_date}")
     print("="*80)
     
     results, all_signals, stock_results, stock_hist = await validate_mini_universe(
-        symbols=MINI_UNIVERSE,
-        start_date="1996-01-01",
-        end_date="2025-01-01"
+        symbols=args.symbols,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        execution_model=args.execution_model,
+        alpha_threshold_mode=args.alpha_threshold_mode,
+        q_long=args.q_long,
+        q_short=args.q_short
     )
     
     # Summary
@@ -1450,6 +1887,9 @@ async def main():
     
     # NEW: Method comparison (Tier-1 vs Alpha)
     plot_method_comparison(all_signals, output_dir)
+    
+    # NEW: Baseline vs Signal comparison (are we beating random?)
+    plot_baseline_comparison(all_signals, stock_hist, output_dir, args.execution_model)
     
     print("\n" + "="*80)
     print("COMPLETE")

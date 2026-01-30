@@ -16,6 +16,11 @@ def classify_volatility_regime(indicators: Dict[str, Any]) -> Dict[str, Any]:
     realized_vol_252d = vol.get('realized_vol_252d')
     vol_ratio = vol.get('vol_ratio_21v252')
     
+    # Check for unit mismatch: if vol > 2.0, it's probably in percent units
+    if realized_vol_252d is not None and realized_vol_252d > 2.0:
+        logger.warning(f"realized_vol_252d = {realized_vol_252d:.2f} > 2.0, assuming percent units, dividing by 100")
+        realized_vol_252d = realized_vol_252d / 100.0
+    
     if realized_vol_252d is None:
         regime = "neutral"
         description = "Unknown (missing volatility data)"
@@ -68,11 +73,11 @@ def classify_trend_regime(indicators: Dict[str, Any]) -> Dict[str, Any]:
     """
     trend = indicators.get('trend', {})
     
+    price_above_ma75 = trend.get('price_above_ma75')
     price_above_ma200 = trend.get('price_above_ma200')
     adx = trend.get('adx_14d')
-    higher_highs_lows = trend.get('higher_highs_lows')
-    macd_histogram = trend.get('macd_histogram')
-    price_above_ma50 = trend.get('price_above_ma50')
+    higher_highs_lows = trend.get('higher_highs_lows', 'mixed')
+    macd_histogram = trend.get('macd_histogram', 0.0)
     
     if adx is None:
         trend_strength = "unknown"
@@ -83,9 +88,13 @@ def classify_trend_regime(indicators: Dict[str, Any]) -> Dict[str, Any]:
     else:
         trend_strength = "weak"
     
-    if price_above_ma50 and price_above_ma200:
+    # Determine MA alignment with buffer logic
+    if price_above_ma75 is None or price_above_ma200 is None:
+        # If either MA is in neutral zone, consider mixed
+        ma_alignment = "mixed"
+    elif price_above_ma75 and price_above_ma200:
         ma_alignment = "bullish"
-    elif not price_above_ma50 and not price_above_ma200:
+    elif not price_above_ma75 and not price_above_ma200:
         ma_alignment = "bearish"
     else:
         ma_alignment = "mixed"

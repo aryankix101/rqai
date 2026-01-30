@@ -1,263 +1,260 @@
 import logging
 from typing import Dict, Any, Optional
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 REGIME_WEIGHTS = {
-    "uptrend_low_vol": {
-        "momentum": 0.35,
-        "trend": 0.30,
-        "relative_strength": 0.20,
-        "volume": 0.10,
-        "risk": 0.05
-    },
-    "uptrend_neutral_vol": {
-        "momentum": 0.35,
-        "trend": 0.25,
-        "relative_strength": 0.20,
-        "volume": 0.15,
-        "risk": 0.05
-    },
-    "uptrend_high_vol": {
-        "momentum": 0.30,
-        "trend": 0.25,
-        "relative_strength": 0.20,
-        "volume": 0.15,
-        "risk": 0.10  # Increase risk weight in high vol
-    },
-    
-    # Downtrend regimes: Emphasize risk management
-    "downtrend_low_vol": {
-        "momentum": 0.20,
-        "trend": 0.20,
-        "relative_strength": 0.15,
-        "volume": 0.10,
-        "risk": 0.35  # Risk is most important
-    },
-    "downtrend_neutral_vol": {
-        "momentum": 0.20,
-        "trend": 0.15,
-        "relative_strength": 0.15,
-        "volume": 0.10,
-        "risk": 0.40
-    },
-    "downtrend_high_vol": {
-        "momentum": 0.15,
-        "trend": 0.15,
-        "relative_strength": 0.10,
-        "volume": 0.10,
-        "risk": 0.50  # Maximum risk focus
-    },
-    
-    # Choppy/sideways regimes: Balanced approach
-    "choppy_low_vol": {
-        "momentum": 0.25,
-        "trend": 0.20,
-        "relative_strength": 0.25,
-        "volume": 0.15,
-        "risk": 0.15
-    },
-    "choppy_neutral_vol": {
-        "momentum": 0.25,
-        "trend": 0.25,
-        "relative_strength": 0.25,
-        "volume": 0.15,
-        "risk": 0.10
-    },
-    "choppy_high_vol": {
-        "momentum": 0.20,
-        "trend": 0.20,
-        "relative_strength": 0.20,
-        "volume": 0.15,
-        "risk": 0.25
-    }
+    "uptrend_low_vol": {"momentum": 0.35, "trend": 0.30, "relative_strength": 0.20, "volume": 0.10, "risk": 0.05},
+    "uptrend_neutral_vol": {"momentum": 0.35, "trend": 0.25, "relative_strength": 0.20, "volume": 0.15, "risk": 0.05},
+    "uptrend_high_vol": {"momentum": 0.30, "trend": 0.25, "relative_strength": 0.20, "volume": 0.15, "risk": 0.10},
+
+    "downtrend_low_vol": {"momentum": 0.20, "trend": 0.20, "relative_strength": 0.15, "volume": 0.10, "risk": 0.35},
+    "downtrend_neutral_vol": {"momentum": 0.20, "trend": 0.15, "relative_strength": 0.15, "volume": 0.10, "risk": 0.40},
+    "downtrend_high_vol": {"momentum": 0.15, "trend": 0.15, "relative_strength": 0.10, "volume": 0.10, "risk": 0.50},
+
+    "choppy_low_vol": {"momentum": 0.25, "trend": 0.20, "relative_strength": 0.25, "volume": 0.15, "risk": 0.15},
+    "choppy_neutral_vol": {"momentum": 0.25, "trend": 0.25, "relative_strength": 0.25, "volume": 0.15, "risk": 0.10},
+    "choppy_high_vol": {"momentum": 0.20, "trend": 0.20, "relative_strength": 0.20, "volume": 0.15, "risk": 0.25},
 }
 
-# Default weights if regime not recognized
-DEFAULT_WEIGHTS = {
-    "momentum": 0.30,
-    "trend": 0.25,
-    "relative_strength": 0.20,
-    "volume": 0.15,
-    "risk": 0.10
-}
+DEFAULT_WEIGHTS = {"momentum": 0.30, "trend": 0.25, "relative_strength": 0.20, "volume": 0.15, "risk": 0.10}
 
 
-# =============================================================================
-# Core Scoring Functions
-# =============================================================================
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else (hi if x > hi else x)
+
+
+def _safe_get(d: Dict[str, Any], k: str, default: Any = 0.0) -> Any:
+    v = d.get(k, default)
+    return default if v is None else v
+
+
+def _renorm_weights(weights: Dict[str, float], keys: Dict[str, bool]) -> Dict[str, float]:
+    """
+    Renormalize a weight dict given a mask of which keys are enabled (True) vs disabled (False).
+    Any disabled key weight is set to 0 and remaining weights are scaled to sum to 1.
+    """
+    out = dict(weights)
+    for k, enabled in keys.items():
+        if not enabled and k in out:
+            out[k] = 0.0
+    s = sum(out.values())
+    if s <= 1e-12:
+        return out
+    return {k: (v / s) for k, v in out.items()}
+
+
+def _compute_quality(
+    risk_score_0_1: float,
+    volume_score_0_1: float,
+    regime_score_0_1: float,
+) -> float:
+    # Quality is NOT directional. It should represent "permission to size up", not a sign.
+    # Weighted blend, clamped to [0,1].
+    q = 0.45 * risk_score_0_1 + 0.25 * volume_score_0_1 + 0.30 * regime_score_0_1
+    return _clamp(q, 0.0, 1.0)
+
+
+def _size_multiplier_from_quality(q: float, lo: float = 0.55, hi: float = 1.35) -> float:
+    # Nonlinear map q∈[0,1] -> [lo, hi] with q^1.3 to emphasize higher quality
+    q_clamped = _clamp(q, 0.0, 1.0)
+    return lo + (hi - lo) * (q_clamped ** 1.3)
+
 
 def calculate_tier1_master_score(
     composite_scores: Dict[str, Dict[str, Any]],
     regime: Dict[str, Any],
-    verbose: bool = False
+    verbose: bool = False,
+    # Gates (risk as gate, not multiplier)
+    min_risk_quality: float = 0.35,
+    min_volume_quality: float = 0.35,
+    # If gate fails, we don't flip direction — we cap sizing and confidence.
+    gated_size_cap: float = 0.85,
 ) -> Dict[str, Any]:
     """
-    Calculate Tier-1 master deterministic score using regime-adjusted weights.
-    
-    Args:
-        composite_scores: Dictionary with all composite score results
-        regime: Market regime classification from regime_classifier
-        verbose: If True, log detailed breakdown
-    
-    Returns:
-        {
-            "tier1_score": float,           # [-1, 1] master score
-            "weights_used": dict,           # Weights applied
-            "weighted_contributions": dict, # Each component's contribution
-            "regime": str,                  # Regime used for weighting
-            "interpretation": str,          # Human-readable
-            "confidence": float             # [0, 1] confidence in signal
-        }
+    Tier-1 deterministic output split into:
+      - tier1_direction: [-1,1] directional context (mom/trend/RS later)
+      - tier1_quality: [0,1] environment/permission (risk + volume + regime)
+      - size_multiplier: sizing scalar derived from quality (and gates)
     """
-    # Extract composite scores
-    momentum_score = composite_scores['momentum_composite']['score']
-    trend_score = composite_scores['trend_composite']['score']
-    rs_score = composite_scores['rs_composite']['score']
-    volume_score = composite_scores['volume_composite']['score']
-    risk_score = composite_scores['risk_composite']['score']
-    
-    # Get regime and select appropriate weights
-    combined_regime = regime.get('combined_regime', 'unknown')
+
+    momentum_score = float(_safe_get(composite_scores.get("momentum_composite", {}), "score", 0.0))
+    trend_score = float(_safe_get(composite_scores.get("trend_composite", {}), "score", 0.0))
+    rs_score = float(_safe_get(composite_scores.get("rs_composite", {}), "score", 0.0))
+    volume_score = float(_safe_get(composite_scores.get("volume_composite", {}), "score", 0.5))  # [0,1]
+    risk_score = float(_safe_get(composite_scores.get("risk_composite", {}), "score", 0.5))      # [0,1]
+
+    combined_regime = regime.get("combined_regime", "unknown")
+    regime_score = float(_safe_get(regime, "regime_score", 0.5))  # [0,1]
     weights = REGIME_WEIGHTS.get(combined_regime, DEFAULT_WEIGHTS)
-    
-    if verbose:
-        logger.info(f"Using weights for regime: {combined_regime}")
-        logger.info(f"Weights: {weights}")
-    
-    # Calculate weighted contributions
-    # Note: risk and volume are [0,1], need to convert to contribution
-    # For risk: high risk score = good, contributes positively
-    # For volume: high volume score = good confirmation, contributes positively
-    
-    # Risk: Convert [0,1] to influence on signal
-    # High risk score (good risk profile) allows full signal
-    # Low risk score (bad risk profile) dampens signal
-    risk_multiplier = 0.5 + (risk_score * 0.5)  # Range [0.5, 1.0]
-    
-    # Volume: Convert [0,1] to confirmation boost/penalty
-    # High volume = boost, low volume = penalty
-    volume_contribution = (volume_score - 0.5) * 2  # Convert to [-1, 1]
-    
-    # Calculate weighted contributions
-    contributions = {
-        "momentum": weights["momentum"] * momentum_score,
-        "trend": weights["trend"] * trend_score,
-        "relative_strength": weights["relative_strength"] * rs_score,
-        "volume": weights["volume"] * volume_contribution,
-        "risk_adjustment": 0.0  # Calculated below
+
+    # RS is not implemented yet in your pipeline (currently 0 / dead). Don’t let it dilute direction.
+    # Check the "available" flag from RS composite
+    rs_composite = composite_scores.get("rs_composite", {})
+    rs_available = rs_composite.get("available", False)
+
+    # Direction weights: only directional components should contribute to tier1_direction.
+    # Volume and risk are quality/permission; keep them OUT of direction.
+    dir_weights_raw = {
+        "momentum": float(weights.get("momentum", 0.0)),
+        "trend": float(weights.get("trend", 0.0)),
+        "relative_strength": float(weights.get("relative_strength", 0.0)),
     }
-    
-    # Sum base signal (before risk adjustment)
-    base_signal = (
-        contributions["momentum"] +
-        contributions["trend"] +
-        contributions["relative_strength"] +
-        contributions["volume"]
+    dir_weights = _renorm_weights(
+        dir_weights_raw,
+        keys={"relative_strength": rs_available, "momentum": True, "trend": True},
     )
-    
-    # Apply risk multiplier
-    tier1_score = base_signal * risk_multiplier
-    contributions["risk_adjustment"] = tier1_score - base_signal
-    
-    # Clamp to [-1, 1]
-    tier1_score = max(-1.0, min(1.0, tier1_score))
-    
-    # Calculate confidence based on:
-    # 1. Signal strength (absolute value)
-    # 2. Regime quality
-    # 3. Volume confirmation
-    # 4. Component agreement
+
+    tier1_direction = (
+        dir_weights["momentum"] * momentum_score +
+        dir_weights["trend"] * trend_score +
+        dir_weights["relative_strength"] * (rs_score if rs_available else 0.0)
+    )
+    tier1_direction = _clamp(tier1_direction, -1.0, 1.0)
+
+    # Quality is permission to size/act, NOT a directional contribution.
+    tier1_quality = _compute_quality(risk_score_0_1=risk_score, volume_score_0_1=volume_score, regime_score_0_1=regime_score)
+
+    gates = {
+        "risk_ok": risk_score >= min_risk_quality,
+        "volume_ok": volume_score >= min_volume_quality,
+        "rs_available": rs_available,
+    }
+
+    size_multiplier = _size_multiplier_from_quality(tier1_quality)
+    if not gates["risk_ok"] or not gates["volume_ok"]:
+        size_multiplier = min(size_multiplier, gated_size_cap)
+
+    # Keep the legacy "tier1_score" as the directional score (so it can be used for sign agreement).
+    tier1_score = tier1_direction
+
+    contributions = {
+        "direction": {
+            "momentum": dir_weights["momentum"] * momentum_score,
+            "trend": dir_weights["trend"] * trend_score,
+            "relative_strength": dir_weights["relative_strength"] * (rs_score if rs_available else 0.0),
+        },
+        "quality": {
+            "risk_score_0_1": risk_score,
+            "volume_score_0_1": volume_score,
+            "regime_score_0_1": regime_score,
+        },
+    }
+
     confidence = _calculate_confidence(
-        tier1_score=tier1_score,
-        regime_score=regime.get('regime_score', 0.5),
-        volume_score=volume_score,
-        composite_scores=composite_scores
+        tier1_direction=tier1_direction,
+        tier1_quality=tier1_quality,
+        composite_scores=composite_scores,
+        rs_available=rs_available,
     )
-    
-    # Interpretation
-    interpretation = _generate_interpretation(tier1_score, confidence, combined_regime)
-    
+
+    # If gates fail, confidence should also be capped (permission failure).
+    if not gates["risk_ok"] or not gates["volume_ok"]:
+        confidence = min(confidence, 0.55)
+
+    interpretation = _generate_interpretation(
+        score=tier1_score,
+        confidence=confidence,
+        regime=combined_regime,
+        tier1_quality=tier1_quality,
+        size_multiplier=size_multiplier,
+        gates=gates,
+    )
+
     result = {
-        "tier1_score": tier1_score,
+        "tier1_score": tier1_score,                 # [-1,1] directional (legacy key)
+        "tier1_direction": tier1_direction,         # [-1,1] explicit
+        "tier1_quality": tier1_quality,             # [0,1]
+        "size_multiplier": size_multiplier,         # scalar for sizing
+        "gates": gates,
         "weights_used": weights,
-        "weighted_contributions": contributions,
+        "direction_weights_used": dir_weights,
+        "contributions": contributions,
         "regime": combined_regime,
         "interpretation": interpretation,
-        "confidence": confidence
+        "confidence": confidence,
     }
-    
+
     if verbose:
-        logger.info(f"Tier-1 Score: {tier1_score:+.3f}")
-        logger.info(f"Confidence: {confidence:.3f}")
-        logger.info(f"Interpretation: {interpretation}")
-    
+        logger.info(f"Using weights for regime: {combined_regime}")
+        logger.info(f"Raw regime weights: {weights}")
+        logger.info(f"Directional weights used: {dir_weights}")
+        logger.info(f"Tier-1 Direction: {tier1_direction:+.3f}")
+        logger.info(f"Tier-1 Quality:   {tier1_quality:.3f}")
+        logger.info(f"Size Mult:        {size_multiplier:.2f} (gates={gates})")
+        logger.info(f"Confidence:       {confidence:.3f}")
+        logger.info(f"Interpretation:   {interpretation}")
+
     return result
 
 
 def _calculate_confidence(
-    tier1_score: float,
-    regime_score: float,
-    volume_score: float,
-    composite_scores: Dict[str, Dict[str, Any]]
+    tier1_direction: float,
+    tier1_quality: float,
+    composite_scores: Dict[str, Dict[str, Any]],
+    rs_available: bool,
 ) -> float:
     """
-    Calculate confidence in the signal [0, 1].
-    
-    Factors:
-    - Signal strength (higher absolute value = more confident)
-    - Regime quality (good regime = more confident)
-    - Volume confirmation (high volume = more confident)
-    - Component agreement (aligned composites = more confident)
+    Confidence in [0,1]:
+      - Stronger direction magnitude => more confident
+      - Higher quality => more confident
+      - Agreement between directional components => more confident
     """
-    # Signal strength component [0, 1]
-    signal_strength = abs(tier1_score)
-    
-    # Regime quality component [0, 1]
-    regime_component = regime_score
-    
-    # Volume component [0, 1]
-    volume_component = volume_score
-    
-    # Component agreement: Check if momentum and trend align
-    momentum = composite_scores['momentum_composite']['score']
-    trend = composite_scores['trend_composite']['score']
-    rs = composite_scores['rs_composite']['score']
-    
-    # Agreement score: higher if components have same sign
-    agreement = 0.5  # Start neutral
-    
-    if momentum > 0 and trend > 0 and rs > 0:
-        agreement = 1.0  # All bullish
-    elif momentum < 0 and trend < 0 and rs < 0:
-        agreement = 0.9  # All bearish
-    elif momentum > 0.3 and trend > 0.3:
-        agreement = 0.8  # Momentum + trend bullish
-    elif momentum < -0.3 and trend < -0.3:
-        agreement = 0.7  # Momentum + trend bearish
-    elif (momentum > 0) != (trend > 0):
-        agreement = 0.3  # Divergence - low confidence
-    
-    # Weighted confidence
+    signal_strength = _clamp(abs(tier1_direction), 0.0, 1.0)
+    quality_component = _clamp(tier1_quality, 0.0, 1.0)
+
+    momentum = float(_safe_get(composite_scores.get("momentum_composite", {}), "score", 0.0))
+    trend = float(_safe_get(composite_scores.get("trend_composite", {}), "score", 0.0))
+    rs = float(_safe_get(composite_scores.get("rs_composite", {}), "score", 0.0)) if rs_available else 0.0
+
+    # Agreement is continuous-ish and ignores RS if not available.
+    def sgn(x: float, eps: float = 0.05) -> int:
+        if x > eps:
+            return 1
+        if x < -eps:
+            return -1
+        return 0
+
+    sm = sgn(momentum)
+    st = sgn(trend)
+    sr = sgn(rs) if rs_available else 0
+
+    # Base agreement from mom/trend
+    if sm == 0 or st == 0:
+        agreement_mt = 0.55  # weak/unclear signals
+    elif sm == st:
+        agreement_mt = 0.85
+    else:
+        agreement_mt = 0.35
+
+    # If RS is available, incorporate it softly (don’t hard-require it).
+    if rs_available and (sr != 0) and (sm != 0) and (st != 0):
+        if sr == sm == st:
+            agreement = min(1.0, agreement_mt + 0.10)
+        elif sr != sm and sr != st:
+            agreement = max(0.20, agreement_mt - 0.10)
+        else:
+            agreement = agreement_mt
+    else:
+        agreement = agreement_mt
+
     confidence = (
-        0.35 * signal_strength +
-        0.25 * regime_component +
-        0.20 * volume_component +
-        0.20 * agreement
+        0.40 * signal_strength +
+        0.35 * quality_component +
+        0.25 * agreement
     )
-    
-    return max(0.0, min(1.0, confidence))
+    return _clamp(confidence, 0.0, 1.0)
 
 
 def _generate_interpretation(
     score: float,
     confidence: float,
-    regime: str
+    regime: str,
+    tier1_quality: float,
+    size_multiplier: float,
+    gates: Dict[str, bool],
 ) -> str:
-    """Generate human-readable interpretation of the signal."""
-    
-    # Signal direction and strength
     if score > 0.5:
         signal = "STRONG BULLISH"
     elif score > 0.25:
@@ -268,8 +265,7 @@ def _generate_interpretation(
         signal = "MODERATE BEARISH"
     else:
         signal = "STRONG BEARISH"
-    
-    # Confidence qualifier
+
     if confidence > 0.75:
         conf_qual = "high confidence"
     elif confidence > 0.6:
@@ -278,166 +274,12 @@ def _generate_interpretation(
         conf_qual = "moderate confidence"
     else:
         conf_qual = "low confidence"
-    
-    return f"{signal} ({conf_qual}, {regime})"
 
+    gate_note = ""
+    if not gates.get("risk_ok", True) or not gates.get("volume_ok", True):
+        gate_note = " [GATED]"
 
-# =============================================================================
-# Batch Processing
-# =============================================================================
-
-def score_universe(
-    indicators_dict: Dict[str, Dict[str, Any]],
-    composites_dict: Dict[str, Dict[str, Any]],
-    regimes_dict: Dict[str, Dict[str, Any]],
-    verbose: bool = True
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Calculate Tier-1 scores for multiple stocks.
-    
-    Args:
-        indicators_dict: Raw indicators for each symbol
-        composites_dict: Composite scores for each symbol
-        regimes_dict: Regime classifications for each symbol
-        verbose: If True, log results
-    
-    Returns:
-        Dictionary mapping symbol -> tier1 score results
-    """
-    scores = {}
-    
-    if verbose:
-        logger.info(f"\n{'='*80}")
-        logger.info(f"TIER-1 DETERMINISTIC SCORING: Processing {len(composites_dict)} symbols")
-        logger.info(f"{'='*80}\n")
-    
-    for symbol in composites_dict.keys():
-        if symbol not in regimes_dict:
-            logger.warning(f"Skipping {symbol}: missing regime data")
-            continue
-        
-        tier1_result = calculate_tier1_master_score(
-            composite_scores=composites_dict[symbol],
-            regime=regimes_dict[symbol],
-            verbose=False
-        )
-        
-        scores[symbol] = tier1_result
-        
-        if verbose:
-            score = tier1_result['tier1_score']
-            conf = tier1_result['confidence']
-            logger.info(f"{symbol}: {score:+.3f} (conf={conf:.2f}) - {tier1_result['interpretation']}")
-    
-    if verbose:
-        logger.info(f"\n{'='*80}")
-        logger.info(f"SCORING COMPLETE")
-        logger.info(f"{'='*80}")
-    
-    return scores
-
-
-def rank_by_score(
-    scores_dict: Dict[str, Dict[str, Any]],
-    min_confidence: float = 0.0
-) -> list:
-    """
-    Rank stocks by Tier-1 score, filtered by minimum confidence.
-    
-    Args:
-        scores_dict: Dictionary of tier1 score results
-        min_confidence: Minimum confidence threshold
-    
-    Returns:
-        List of (symbol, score, confidence) tuples, sorted by score descending
-    """
-    # Filter by confidence
-    filtered = {
-        symbol: result
-        for symbol, result in scores_dict.items()
-        if result['confidence'] >= min_confidence
-    }
-    
-    # Sort by score (descending for longs, ascending for shorts)
-    ranked = sorted(
-        filtered.items(),
-        key=lambda x: x[1]['tier1_score'],
-        reverse=True
+    return (
+        f"{signal} ({conf_qual}, {regime})"
+        f" | quality={tier1_quality:.2f}, size_mult={size_multiplier:.2f}{gate_note}"
     )
-    
-    return [
-        (symbol, result['tier1_score'], result['confidence'])
-        for symbol, result in ranked
-    ]
-
-
-# =============================================================================
-# Example Usage
-# =============================================================================
-
-if __name__ == "__main__":
-    import json
-    from pathlib import Path
-    from composite_scores import calculate_all_composites
-    from regime_classifier import classify_market_regime
-    
-    output_dir = Path("./output")
-    
-    if not output_dir.exists():
-        logger.error("Output directory not found.")
-        exit(1)
-    
-    # Load all indicators
-    indicators_dict = {}
-    for json_file in output_dir.glob("*_technical_indicators.json"):
-        with open(json_file) as f:
-            data = json.load(f)
-            symbol = data['id']['symbol']
-            indicators_dict[symbol] = data
-    
-    if not indicators_dict:
-        logger.error("No indicator files found.")
-        exit(1)
-    
-    # Calculate composites for all
-    logger.info("Calculating composite scores...")
-    composites_dict = {}
-    for symbol, indicators in indicators_dict.items():
-        composites_dict[symbol] = calculate_all_composites(indicators)
-    
-    # Classify regimes for all
-    logger.info("Classifying regimes...")
-    regimes_dict = {}
-    for symbol, indicators in indicators_dict.items():
-        regimes_dict[symbol] = classify_market_regime(indicators)
-    
-    # Calculate Tier-1 scores
-    scores_dict = score_universe(
-        indicators_dict=indicators_dict,
-        composites_dict=composites_dict,
-        regimes_dict=regimes_dict,
-        verbose=True
-    )
-    
-    # Rank stocks
-    print("\n" + "="*80)
-    print("RANKED BY TIER-1 DETERMINISTIC SCORE")
-    print("="*80)
-    
-    ranked = rank_by_score(scores_dict, min_confidence=0.0)
-    
-    print(f"\n{'Rank':<6} {'Symbol':<8} {'Score':<10} {'Confidence':<12} {'Signal'}")
-    print("-" * 80)
-    
-    for i, (symbol, score, confidence) in enumerate(ranked, 1):
-        signal_type = "LONG" if score > 0.25 else ("SHORT" if score < -0.25 else "NEUTRAL")
-        print(f"{i:<6} {symbol:<8} {score:+.3f}     {confidence:.3f}        {signal_type}")
-    
-    print("="*80)
-    
-    # Summary statistics
-    long_candidates = [s for s, sc, c in ranked if sc > 0.25 and c > 0.5]
-    short_candidates = [s for s, sc, c in ranked if sc < -0.25 and c > 0.5]
-    
-    print(f"\nLONG candidates (score > 0.25, conf > 0.5): {', '.join(long_candidates) if long_candidates else 'None'}")
-    print(f"SHORT candidates (score < -0.25, conf > 0.5): {', '.join(short_candidates) if short_candidates else 'None'}")
