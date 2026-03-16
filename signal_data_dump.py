@@ -17,8 +17,8 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from technical_indicators_calculator import TechnicalIndicatorCalculator
 from hit_rate_validator import calculate_forward_return_label
+from technical_indicators_calculator import TechnicalIndicatorCalculator
 
 # ----------------------------
 # Config / Secrets
@@ -56,8 +56,27 @@ def make_retry_session(
     return session
 
 
-# Note: We dump ALL indicators from the calculator.
-# The composite_score_calculator.py will filter by DIRECTION_SIGNS and MAGNITUDE_SIGNS keys.
+
+REQUIRED_INDICATORS = {
+    "vix_percentile_252d",
+    "vol_percentile_504d",
+    "vix_level",
+    "vol_imbalance_20d",
+    "m2_m1_ratio",
+    "atr_14d_pct",
+    "realized_vol_10d",
+    "vol_adjusted_trend_ma100",
+    "range_pos_55d",
+    "pct_from_52w_high",
+    "range_pct",
+    "autocorr_5d",
+    "mom_3m",
+    "rsi_5d",
+    "vel_10d_over_vol",
+    "days_since_52w_high",
+    "vol_adjusted_trend_ma100_slope",
+    "pct_from_ma100",
+}
 
 
 # ----------------------------
@@ -199,13 +218,15 @@ class SignalDataDumper:
                 all_indicators.update(vix_indicators)
                 all_indicators.update(term_structure)
 
-                # Calculate forward returns for multiple horizons: 1d, 5d, 10d, 20d, 30d, 60d
-                fwd_1d = calculate_forward_return_label(self.hist, date, 1, "next_open_to_close")
-                fwd_5d = calculate_forward_return_label(self.hist, date, 5, "next_open_to_close_hold")
-                fwd_10d = calculate_forward_return_label(self.hist, date, 10, "next_open_to_close_hold")
-                fwd_20d = calculate_forward_return_label(self.hist, date, 20, "next_open_to_close_hold")
-                fwd_30d = calculate_forward_return_label(self.hist, date, 30, "next_open_to_close_hold")
-                fwd_60d = calculate_forward_return_label(self.hist, date, 60, "next_open_to_close_hold")
+                # Forward labels use the canonical convention:
+                # signal at today's close, enter next trading day open,
+                # exit after N holding days at the next open.
+                fwd_1d = calculate_forward_return_label(self.hist, date, 1)
+                fwd_5d = calculate_forward_return_label(self.hist, date, 5)
+                fwd_10d = calculate_forward_return_label(self.hist, date, 10)
+                fwd_20d = calculate_forward_return_label(self.hist, date, 20)
+                fwd_30d = calculate_forward_return_label(self.hist, date, 30)
+                fwd_60d = calculate_forward_return_label(self.hist, date, 60)
                 
                 # Absolute values for magnitude score IC
                 fwd_abs_5d = abs(fwd_5d) if fwd_5d is not None and not np.isnan(fwd_5d) else np.nan
@@ -239,8 +260,12 @@ class SignalDataDumper:
                     "fwd_abs_60d_ret": fwd_abs_60d,
                 }
 
-                # Add all indicators with type labels
+                # Add all indicators with type labels - FILTER TO REQUIRED ONLY
                 for ind_name, ind_value in all_indicators.items():
+                    # Skip indicators not in our required set
+                    if ind_name not in REQUIRED_INDICATORS:
+                        continue
+                    
                     if ind_value is None or isinstance(ind_value, (bool, np.bool_)):
                         record[ind_name] = np.nan
                         continue
@@ -267,13 +292,15 @@ class SignalDataDumper:
         return records
 
     def _save_signals(self, df: pd.DataFrame):
-        """Save signals to CSV with all indicators"""
+        """Save signals to CSV with only required indicators"""
         ensure_dir("backtest_results/signal_data_dump")
 
         # Metadata columns first: include all forward return horizons (5d, 10d, 20d, 30d, 60d)
-        metadata_cols = ["date", "adj_close", "fwd_1d_ret", "fwd_5d_ret", "fwd_10d_ret", "fwd_20d_ret", "fwd_30d_ret", "fwd_60d_ret",
+        metadata_cols = ["date", "adj_open", "adj_close", "fwd_1d_ret", "fwd_5d_ret", "fwd_10d_ret", "fwd_20d_ret", "fwd_30d_ret", "fwd_60d_ret",
                          "fwd_abs_5d_ret", "fwd_abs_10d_ret", "fwd_abs_20d_ret", "fwd_abs_30d_ret", "fwd_abs_60d_ret"]
-        indicator_cols = sorted([c for c in df.columns if c not in metadata_cols])
+        
+        # Only include indicators that are in REQUIRED_INDICATORS
+        indicator_cols = sorted([c for c in df.columns if c in REQUIRED_INDICATORS])
 
         column_order = metadata_cols + indicator_cols
         df_ordered = df[column_order]
@@ -289,7 +316,12 @@ class SignalDataDumper:
         print(f"  Date range: {df['date'].min()} to {df['date'].max()}")
         print(f"  Total indicators: {len(indicator_cols)}")
         print(f"  Total columns: {len(df.columns)}")
-        print(f"  Forward horizons: 1d, 5d, 10d, 20d, 30d, 60d (with absolute versions for 5d-60d)")
+        print("  Forward horizons: 1d, 5d, 10d, 20d, 30d, 60d")
+        print("  Execution timing: signal close -> next open entry -> +N open exit")
+        print(f"\nIndicators included ({len(indicator_cols)}):")
+        for col in indicator_cols:
+            print(f"    - {col}")
+        print("  Absolute versions included for 5d-60d")
 
 
 def main():

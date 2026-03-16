@@ -1,6 +1,6 @@
 """
+THIS BUILDS EQUAL WEIGHT PORTFOLIO
 Factor Backtest Engine — Test composite scores as systematic return factors
-Top 20 / Bottom 20 long/short, 10-day rebalance
 """
 
 import pandas as pd
@@ -13,6 +13,9 @@ import scipy.stats
 import warnings
 import sys
 
+from hit_rate_validator import CANONICAL_EXECUTION_MODEL, get_trade_window
+from portfolio_constraints import MIN_TRADE_PRICE, has_min_trade_price
+
 warnings.filterwarnings("ignore")
 sns.set_style("darkgrid")
 
@@ -23,16 +26,13 @@ COMPOSITE_SCORES_DIR = Path("backtest_results/composite_scores")
 OUTPUT_DIR_BASE = Path("backtest_results/factor_backtest")
 
 # Factor construction
-FORWARD_DAYS = 10  # Forward return horizon: 5, 10, 20, 60 days etc. CHANGE THIS TO TEST DIFFERENT HORIZONS
-REBALANCE_DAYS = FORWARD_DAYS  # Rebalance frequency matches forward horizon (override via CLI)
+FORWARD_DAYS = 10 
+REBALANCE_DAYS = FORWARD_DAYS  
 TOP_N = 30
 BOTTOM_N = 30
 COST_RATE = 0.0015  # 15 bps one-way cost (commission + spread + slippage per trade)
                      # Turnover = sum(|w_new - w_old|) = 2x full notional traded (long-short)
 SCORE_TYPES = ["direction_score", "magnitude_score"]
-
-# Excluded tickers (removed from testing)
-EXCLUDED_TICKERS = {"CPWR"}
 
 
 def _ic_target(score_type: str) -> str:
@@ -76,8 +76,6 @@ def load_all_composites(ticker_filter=None):
         ticker_set = {t.upper() for t in ticker_filter}
         csv_files = [f for f in csv_files if f.stem.split("_")[2].upper() in ticker_set]
     
-    # Exclude tickers in EXCLUDED_TICKERS
-    csv_files = [f for f in csv_files if f.stem.split("_")[2].upper() not in EXCLUDED_TICKERS]
     
     print(f"📂 Loading {len(csv_files)} stocks...\n")
     
@@ -86,6 +84,12 @@ def load_all_composites(ticker_filter=None):
             ticker = csv_file.stem.split("_")[2]
             df = pd.read_csv(csv_file, parse_dates=["date"])
             df = df.sort_values("date").reset_index(drop=True)
+            missing_price_cols = {"adj_open", "adj_close"} - set(df.columns)
+            if missing_price_cols:
+                raise ValueError(
+                    f"missing required columns {sorted(missing_price_cols)}; "
+                    "re-run composite_score_calculator.py with the updated signal dump"
+                )
             results[ticker] = df
             print(f"   ✓ {ticker:6s} - {len(df)} records")
         except Exception as e:
@@ -121,6 +125,45 @@ def get_rebalance_dates(spy_dates, rebalance_days=10):
     spy_dates = sorted(spy_dates.unique())
     rebalance_dates = spy_dates[::rebalance_days]
     return spy_dates, rebalance_dates
+
+
+def _build_execution_schedule(calendar_dates, signal_dates):
+    """Map each signal close date to the next trading day's execution open."""
+    calendar = [pd.Timestamp(d) for d in sorted(pd.to_datetime(calendar_dates).unique())]
+    date_to_idx = {date: idx for idx, date in enumerate(calendar)}
+    execution_schedule = {}
+
+    for signal_date in sorted(pd.to_datetime(signal_dates)):
+        signal_ts = pd.Timestamp(signal_date)
+        idx = date_to_idx.get(signal_ts)
+        if idx is None or idx + 1 >= len(calendar):
+            continue
+        execution_schedule[calendar[idx + 1]] = signal_ts
+
+    return execution_schedule
+
+
+def _cross_sectional_snapshot(all_data, signal_date, score_type="direction_score"):
+    """Scores and realized forward returns from a single signal date."""
+    ret_col = _ic_target(score_type)
+    rows = []
+
+    for ticker, df in all_data.items():
+        row = df[df["date"] == signal_date]
+        if row.empty or ret_col not in row.columns:
+            continue
+
+        row = row.iloc[0]
+        score = row.get(score_type, np.nan)
+        ret_pct = row.get(ret_col, np.nan)
+        if pd.notna(score) and pd.notna(ret_pct):
+            rows.append({
+                "ticker": ticker,
+                "score": float(score),
+                "ret": float(ret_pct) / 100.0,
+            })
+
+    return pd.DataFrame(rows)
 
 
 def identify_regimes(spy_df):
@@ -226,14 +269,12 @@ def identify_regimes(spy_df):
 def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direction_score", regime_map=None):
     """Build daily returns from top n / bottom n equal weight market-neutral portfolio
     
-    Correct PnL mechanics:
-    - Pre-align all prices to SPY calendar via forward-fill
-      (stale price day = 0 return, no multi-day jumps)
-    - Mark-to-market OLD positions FIRST each day
-    - THEN rebalance: new last_price = today's close, accrual starts tomorrow
-    - Transaction cost = COST_RATE (one-way) * turnover on each rebalance
-    
-    Convention: trade at close, returns accrue close-to-close from next day
+    Canonical execution mechanics:
+    - Signal is observed at the rebalance date close
+    - Portfolio is entered/exited at the NEXT trading day's open
+    - PnL accrues open-to-open
+    - Transaction cost = COST_RATE (one-way) * turnover on each rebalance open
+    - Only stocks with execution prices above the minimum trade price are eligible
     """
     
     pnl_records = []
@@ -244,6 +285,7 @@ def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direct
     print(f"   Gross exposure: 2.0x (long-short market-neutral)")
     print(f"   Rebalance period: {REBALANCE_DAYS} days")
     print(f"   Cost model: {COST_RATE*10000:.0f} bps one-way")
+    print(f"   Min entry price: > ${MIN_TRADE_PRICE:.2f}")
     print(f"   Score type: {score_type}")
     print(f"   Rebalance dates: {len(rebalance_dates)}\n")
     
@@ -252,23 +294,28 @@ def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direct
         all_data[ticker]["date"] = pd.to_datetime(all_data[ticker]["date"])
     spy_df["date"] = pd.to_datetime(spy_df["date"])
     
-    # Master calendar from SPY — clipped to rebalance window
-    all_dates = sorted(pd.to_datetime(spy_df["date"].values).unique())
-    if rebalance_dates:
-        first_rebal = pd.Timestamp(min(rebalance_dates))
-        all_dates = [d for d in all_dates if d >= first_rebal]
-    rebalance_set = set(rebalance_dates)
-    
-    # Pre-align prices and scores to SPY calendar
-    # Forward-fill prices: trading halt / weekend gaps → 0 return that day (correct)
-    # Do NOT forward-fill scores: only use actual signal dates for rebalance decisions
-    print("   Pre-aligning prices to SPY calendar (forward-fill)...")
+    # Master calendar from SPY
+    calendar_dates = [pd.Timestamp(d) for d in sorted(pd.to_datetime(spy_df["date"].values).unique())]
+    execution_schedule = _build_execution_schedule(calendar_dates, rebalance_dates)
+    if not execution_schedule:
+        return pd.DataFrame(columns=[
+            "date", "daily_ret_bps", "long_pnl_bps", "short_pnl_bps",
+            "num_longs", "num_shorts", "cost_bps_applied", "rebalance_signal_date",
+        ])
+
+    first_execution = min(execution_schedule.keys())
+    all_dates = [d for d in calendar_dates if d >= first_execution]
+
+    # Pre-align opens to the SPY calendar.
+    # Forward-fill handles non-trading stock days as stale-open / zero-return days.
+    print(f"   Execution model: {CANONICAL_EXECUTION_MODEL} (signal close -> next open)")
+    print("   Pre-aligning opens to SPY calendar (forward-fill)...")
     price_matrix = {}  # ticker -> pd.Series indexed by SPY dates
-    score_matrix = {}  # ticker -> pd.Series indexed by SPY dates (no ffill)
+    score_matrix = {}  # ticker -> raw scores indexed by signal date
     for ticker, df in all_data.items():
         df_indexed = df.set_index("date")
-        price_matrix[ticker] = df_indexed["adj_close"].reindex(all_dates).ffill()
-        score_matrix[ticker] = df_indexed[score_type].reindex(all_dates)
+        price_matrix[ticker] = df_indexed["adj_open"].reindex(all_dates).ffill()
+        score_matrix[ticker] = df_indexed[score_type]
     
     positions = {}   # ticker -> {'weight': float, 'last_price': float}
     old_weights = {} # previous period weights for turnover calc
@@ -280,9 +327,7 @@ def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direct
         num_longs = 0
         num_shorts = 0
         
-        # ── Step 1: Mark-to-market EXISTING positions ────────────────────────
-        # Must happen BEFORE rebalance so outgoing holdings capture their
-        # close-to-close return on the rebalance day (no dropped PnL days).
+        # ── Step 1: Mark-to-market existing positions open-to-open ───────────
         for ticker, pos_info in list(positions.items()):
             current_price = price_matrix[ticker].get(trade_date, np.nan) if ticker in price_matrix else np.nan
             last_price = pos_info["last_price"]
@@ -300,18 +345,14 @@ def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direct
                 positions[ticker]["last_price"] = current_price
             # NaN price (pre-IPO): forward-fill handles this; 0 contribution
             
-            if weight > 0:
-                num_longs += 1
-            elif weight < 0:
-                num_shorts += 1
-
-        # New holdings get last_price = today's close, start accruing tomorrow
-        if trade_date in rebalance_set:
+        # ── Step 2: Rebalance at today's open using prior-close signals ──────
+        signal_date = execution_schedule.get(trade_date)
+        if signal_date is not None:
             date_scores = {}
             for ticker in all_data:
-                score = score_matrix[ticker].get(trade_date, np.nan) if ticker in score_matrix else np.nan
+                score = score_matrix[ticker].get(signal_date, np.nan) if ticker in score_matrix else np.nan
                 price = price_matrix[ticker].get(trade_date, np.nan) if ticker in price_matrix else np.nan
-                if pd.notna(score) and pd.notna(price) and price > 0:
+                if pd.notna(score) and has_min_trade_price(price):
                     date_scores[ticker] = (score, price)
             
             if len(date_scores) >= TOP_N + BOTTOM_N:
@@ -357,16 +398,19 @@ def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direct
                 short_pnl_bps -= short_cost_bps
                 cost_today = long_cost_bps + short_cost_bps
                 
-                # Reset positions: last_price = today's close (new holdings accrue from tomorrow)
+                # Reset positions at today's open; accrual resumes from this open.
                 positions = {}
                 for ticker, weight in new_weights.items():
                     price = price_matrix[ticker].get(trade_date, np.nan) if ticker in price_matrix else np.nan
-                    if pd.notna(price) and price > 0:
+                    if has_min_trade_price(price):
                         positions[ticker] = {"weight": weight, "last_price": price}
                 
                 # Track old_weights from ACTUAL positions, not intended (avoids phantom turnover)
                 old_weights = {t: p["weight"] for t, p in positions.items()}
         
+        num_longs = sum(1 for pos in positions.values() if pos["weight"] > 0)
+        num_shorts = sum(1 for pos in positions.values() if pos["weight"] < 0)
+
         # Compute total daily return as sum of long and short
         daily_pnl_bps = long_pnl_bps + short_pnl_bps
         
@@ -378,6 +422,7 @@ def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direct
             "num_longs": num_longs,
             "num_shorts": num_shorts,
             "cost_bps_applied": cost_today,
+            "rebalance_signal_date": signal_date,
         })
     
     pnl_df = pd.DataFrame(pnl_records)
@@ -395,7 +440,7 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
     - Normalize date types (pd.Timestamp)
     - Handle missing regimes gracefully
     - Correct cumulative return calculation
-    - Compute daily cross-sectional IC between score and forward returns
+    - Compute cross-sectional IC using the same forward labels as the signal dump
     """
     
     # Normalize dates to pd.Timestamp
@@ -423,34 +468,12 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
     dd = (cumret - running_max) / running_max
     maxdd = np.min(dd) * 100
     
-    # Compute cross-sectional IC on rebalance dates
-    # Entry: today's close (signal date), Exit: next rebalance's close
+    # Compute cross-sectional IC on signal dates using the canonical forward labels.
     ics = []
-    for i, rebalance_date in enumerate(rebalance_dates[:-1]):
-        next_rebalance = rebalance_dates[i + 1]
-        
-        # Get scores and forward returns
-        scores = []
-        rets = []
-        for ticker, df in all_data.items():
-            score_row = df[df["date"] == rebalance_date]
-            ret_row = df[df["date"] == next_rebalance]
-            
-            if not score_row.empty and not ret_row.empty:
-                score = score_row[score_type].values[0]
-                # Entry: rebalance date's close (signal generated at close)
-                entry_price = score_row["adj_close"].values[0]
-                # Exit: next rebalance date's close
-                exit_price = ret_row["adj_close"].values[0]
-
-                if pd.notna(score) and entry_price > 0 and exit_price > 0:
-                    raw_ret = exit_price / entry_price - 1
-                    ret = abs(raw_ret) if score_type == "magnitude_score" else raw_ret
-                    scores.append(score)
-                    rets.append(ret)
-        
-        if len(scores) >= 10:
-            ic, pval = spearmanr(scores, rets)
+    for rebalance_date in rebalance_dates:
+        snapshot = _cross_sectional_snapshot(all_data, rebalance_date, score_type)
+        if len(snapshot) >= 10:
+            ic, pval = spearmanr(snapshot["score"], snapshot["ret"])
             ics.append(ic)
     
     ic_mean = np.mean(ics) if len(ics) > 0 else 0.0
@@ -503,48 +526,12 @@ def compute_decile_returns(all_data, rebalance_dates, score_type="direction_scor
     
     decile_results = []
     
-    for i, rebalance_date in enumerate(rebalance_dates[:-1]):
-        next_rebalance = rebalance_dates[i + 1]
-        
-        # Get scores
-        date_scores = {}
-        for ticker, df in all_data.items():
-            row = df[df["date"] == rebalance_date]
-            if not row.empty:
-                score = row[score_type].values[0]
-                if pd.notna(score):
-                    date_scores[ticker] = score
-        
-        if len(date_scores) < 10:
+    for rebalance_date in rebalance_dates:
+        snapshot = _cross_sectional_snapshot(all_data, rebalance_date, score_type)
+        if len(snapshot) < 10:
             continue
-        
-        # Get returns
-        date_rets = {}
-        for ticker, df in all_data.items():
-            if ticker not in date_scores:
-                continue
-            
-            entry_row = df[df["date"] == rebalance_date]
-            exit_row = df[df["date"] == next_rebalance]
-            
-            if not entry_row.empty and not exit_row.empty:
-                entry_price = entry_row["adj_close"].values[0]
-                exit_price = exit_row["adj_close"].values[0]
-                if entry_price > 0:
-                    raw_ret = (exit_price - entry_price) / entry_price
-                    ret = abs(raw_ret) if score_type == "magnitude_score" else raw_ret
-                    date_rets[ticker] = ret
-        
-        # Assign deciles
-        decile_df = pd.DataFrame({
-            "ticker": list(date_scores.keys()),
-            "score": list(date_scores.values()),
-            "ret": [date_rets.get(t, np.nan) for t in date_scores.keys()]
-        }).dropna()
-        
-        if len(decile_df) < 10:
-            continue
-        
+
+        decile_df = snapshot.copy()
         decile_df["decile"] = pd.qcut(decile_df["score"], q=10, labels=False, duplicates='drop')
         
         # Calculate decile statistics
@@ -682,79 +669,99 @@ def save_portfolio_selections(all_data, rebalance_dates, output_dir, score_type=
     """Save detailed portfolio selections for each rebalance date
     
     Outputs CSV showing:
-    - rebalance_date
+    - rebalance_date (signal date at close)
+    - entry_date / exit_date (actual trade opens)
     - ticker
     - position_type (long/short)
     - score (direction_score or magnitude_score)
-    - entry_price (close on rebalance date)
-    - exit_price (close on next rebalance)
-    - realized_10d_return (%)
+    - entry_price / exit_price (adjusted opens)
+    - realized return (%)
+
+    Only stocks with entry prices above the minimum trade price are included.
     """
     
     selections = []
-    
-    for i, rebalance_date in enumerate(rebalance_dates[:-1]):
-        next_rebalance = rebalance_dates[i + 1]
-        
+    indexed_data = {
+        ticker: df.sort_values("date").set_index("date")
+        for ticker, df in all_data.items()
+    }
+
+    for rebalance_date in rebalance_dates:
         # Get all scores for this date
         date_scores = {}
-        entry_prices = {}
-        for ticker, df in all_data.items():
-            row = df[df["date"] == rebalance_date]
+        trade_windows = {}
+        for ticker, df_indexed in indexed_data.items():
+            row = df_indexed[df_indexed.index == rebalance_date]
             if not row.empty:
                 score = row[score_type].values[0]
-                price = row["adj_close"].values[0]
-                if pd.notna(score) and pd.notna(price) and price > 0:
+                trade_window = get_trade_window(
+                    hist=df_indexed,
+                    signal_date=rebalance_date,
+                    holding_days=FORWARD_DAYS,
+                    execution_model=CANONICAL_EXECUTION_MODEL,
+                )
+                if (
+                    pd.notna(score)
+                    and trade_window is not None
+                    and has_min_trade_price(trade_window.entry_price)
+                ):
                     date_scores[ticker] = score
-                    entry_prices[ticker] = price
+                    trade_windows[ticker] = trade_window
         
-        if len(date_scores) < TOP_N:
+        if len(date_scores) < TOP_N + BOTTOM_N:
             continue
         
         # Rank by score
         sorted_tickers = sorted(date_scores.keys(), key=lambda t: date_scores[t], reverse=True)
         
-        # Get exit prices and compute returns (long + short legs)
-        exit_prices = {}
-        for ticker in sorted_tickers[:TOP_N] + sorted_tickers[-BOTTOM_N:]:
-            exit_row = all_data[ticker][all_data[ticker]["date"] == next_rebalance]
-            if not exit_row.empty:
-                exit_prices[ticker] = exit_row["adj_close"].values[0]
-        
         # Long positions (top N)
         for rank_idx in range(TOP_N):
             ticker = sorted_tickers[rank_idx]
-            entry = entry_prices.get(ticker, np.nan)
-            exit_p = exit_prices.get(ticker, np.nan)
+            trade_window = trade_windows.get(ticker)
+            if trade_window is None:
+                continue
+            entry = trade_window.entry_price
+            exit_p = trade_window.exit_price
             ret_10d = (exit_p / entry - 1) * 100 if (entry > 0 and exit_p > 0) else np.nan
             
             selections.append({
                 "rebalance_date": rebalance_date,
+                "signal_date": trade_window.signal_date,
+                "entry_date": trade_window.entry_date,
+                "exit_date": trade_window.exit_date,
                 "ticker": ticker,
                 "position_type": "LONG",
                 "rank": rank_idx + 1,
                 "score": date_scores[ticker],
                 "entry_price": entry,
                 "exit_price": exit_p,
+                "realized_return_pct": ret_10d,
                 "realized_10d_return_pct": ret_10d,
             })
         
         # Short positions (bottom N)
         for rank_idx in range(BOTTOM_N):
             ticker = sorted_tickers[-(rank_idx + 1)]
-            entry = entry_prices.get(ticker, np.nan)
-            exit_p = exit_prices.get(ticker, np.nan)
+            trade_window = trade_windows.get(ticker)
+            if trade_window is None:
+                continue
+            entry = trade_window.entry_price
+            exit_p = trade_window.exit_price
             # Short P&L: profit when price falls
             ret_10d = -(exit_p / entry - 1) * 100 if (entry > 0 and exit_p > 0) else np.nan
             
             selections.append({
                 "rebalance_date": rebalance_date,
+                "signal_date": trade_window.signal_date,
+                "entry_date": trade_window.entry_date,
+                "exit_date": trade_window.exit_date,
                 "ticker": ticker,
                 "position_type": "SHORT",
                 "rank": rank_idx + 1,
                 "score": date_scores[ticker],
                 "entry_price": entry,
                 "exit_price": exit_p,
+                "realized_return_pct": ret_10d,
                 "realized_10d_return_pct": ret_10d,
             })
     
@@ -872,25 +879,13 @@ def compute_ic_series(all_data, rebalance_dates, score_type="direction_score"):
     """Return a pd.Series of per-period cross-sectional Spearman ICs, indexed by date.
 
     For magnitude_score, ICs are computed against absolute forward returns.
-    Uses returns between consecutive rebalance dates (REBALANCE_DAYS frequency).
+    Uses the same forward labels created by the signal dump.
     """
-    use_abs = score_type == "magnitude_score"
     records = []
-    for i, rd in enumerate(rebalance_dates[:-1]):
-        nxt = rebalance_dates[i + 1]
-        sc, rt = [], []
-        for df in all_data.values():
-            r0 = df[df["date"] == rd]
-            r1 = df[df["date"] == nxt]
-            if not r0.empty and not r1.empty:
-                s = r0[score_type].values[0]
-                e, x = r0["adj_close"].values[0], r1["adj_close"].values[0]
-                if pd.notna(s) and e > 0 and x > 0:
-                    sc.append(s)
-                    raw_ret = x / e - 1
-                    rt.append(abs(raw_ret) if use_abs else raw_ret)
-        if len(sc) >= 10:
-            ic, _ = spearmanr(sc, rt)
+    for rd in rebalance_dates:
+        snapshot = _cross_sectional_snapshot(all_data, rd, score_type)
+        if len(snapshot) >= 10:
+            ic, _ = spearmanr(snapshot["score"], snapshot["ret"])
             records.append({"date": pd.Timestamp(rd), "ic": float(ic)})
     if not records:
         return pd.Series(dtype=float)
@@ -910,27 +905,23 @@ def compute_regime_signal_decomposition(all_data, pnl_df, rebalance_dates, score
     
     Helps diagnose: Is IC collapsing? Are returns negative despite good IC?
     """
-    use_abs = score_type == "magnitude_score"
     regime_decomp = {}  # regime -> [list of period metrics]
+    execution_schedule = {
+        pd.Timestamp(signal_date): pd.Timestamp(trade_date)
+        for trade_date, signal_date in zip(
+            pd.to_datetime(pnl_df["date"]),
+            pd.to_datetime(pnl_df["rebalance_signal_date"], errors="coerce"),
+        )
+        if pd.notna(signal_date)
+    }
     
-    for i, rd in enumerate(rebalance_dates[:-1]):
-        nxt = rebalance_dates[i + 1]
-        
-        # Get scores and returns on this rebalance date
-        sc, rt = [], []
-        for ticker, df in all_data.items():
-            r0 = df[df["date"] == rd]
-            r1 = df[df["date"] == nxt]
-            if not r0.empty and not r1.empty:
-                s = r0[score_type].values[0]
-                e, x = r0["adj_close"].values[0], r1["adj_close"].values[0]
-                if pd.notna(s) and e > 0 and x > 0:
-                    sc.append(s)
-                    raw_ret = x / e - 1
-                    rt.append(abs(raw_ret) if use_abs else raw_ret)
-        
-        if len(sc) < 10:
+    for rd in rebalance_dates:
+        snapshot = _cross_sectional_snapshot(all_data, rd, score_type)
+        if len(snapshot) < 10:
             continue
+
+        sc = snapshot["score"].tolist()
+        rt = snapshot["ret"].tolist()
         
         # Compute IC
         ic, pval = spearmanr(sc, rt)
@@ -948,8 +939,9 @@ def compute_regime_signal_decomposition(all_data, pnl_df, rebalance_dates, score
         # Cross-sectional dispersion (std of scores)
         cs_disp = np.std(sc)
         
-        # Get regime from pnl_df
-        row_in_pnl = pnl_df[pnl_df["date"] == rd]
+        # Attribute the period to the execution date (the next open after the signal close).
+        execution_date = execution_schedule.get(pd.Timestamp(rd))
+        row_in_pnl = pnl_df[pnl_df["date"] == execution_date] if execution_date is not None else pd.DataFrame()
         if not row_in_pnl.empty:
             regime = row_in_pnl["regime"].values[0]
             turnover = row_in_pnl["cost_bps_applied"].values[0] / COST_RATE / 10000 if COST_RATE > 0 else np.nan
@@ -2031,10 +2023,11 @@ def run_backtest(score_type, all_data, spy_df, regime_map, rebalance_dates, outp
     """
     subdir = output_dir / score_type
     subdir.mkdir(parents=True, exist_ok=True)
+    divider = "─" * 70
 
-    print(f"\n{'\u2500'*70}")
+    print(f"\n{divider}")
     print(f"  Backtest: {score_type.upper().replace('_', ' ')}")
-    print(f"{'\u2500'*70}")
+    print(divider)
 
     pnl_df  = build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type, regime_map)
     pnl_df, metrics = compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type)
@@ -2138,6 +2131,7 @@ def main():
     print(f"Strategy: Top {TOP_N} Long / Bottom {BOTTOM_N} Short, "
           f"Rebalance Every {REBALANCE_DAYS} Days, Equal Weight")
     print(f"Forward Horizon: {FORWARD_DAYS} days")
+    print(f"Min entry price: > ${MIN_TRADE_PRICE:.2f}")
     print(f"Score Types: {', '.join(SCORE_TYPES)}")
     if start_date_ts or end_date_ts:
         date_range = f"{start_date_ts or 'start'} to {end_date_ts or 'end'}"

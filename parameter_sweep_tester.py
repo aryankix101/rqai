@@ -258,7 +258,7 @@ class ComprehensiveIndicatorSweepTester:
         start_date: str,
         end_date: str,
         forward_horizon: int = 1,
-        execution_model: str = "next_open_to_close",
+        execution_model: str = "next_open_to_open_hold",
     ):
         self.symbol = symbol
         self.start_date = start_date
@@ -1106,11 +1106,12 @@ def main():
         print("Usage: python parameter_sweep_tester.py SYMBOL START_DATE END_DATE [FORWARD_HORIZONS] [EXECUTION_MODEL]")
         print()
         print("EXECUTION MODELS:")
-        print("  'next_open_to_close': Intraday (same day) entry→exit only [Use only for horizon=1]")
-        print("  'next_open_to_close_hold': TRUE multi-day holding return [RECOMMENDED for 3d/5d/10d]")
+        print("  'next_open_to_open_hold': Canonical no-lookahead hold [RECOMMENDED]")
+        print("  'next_open_to_close': Intraday next-open to same-day close [legacy]")
+        print("  'next_open_to_close_hold': Next-open to target-day close [legacy]")
         print()
-        print("Example (CORRECT for multi-day):")
-        print("  python parameter_sweep_tester.py SPY 2015-01-01 2024-12-31 '1,3,5,10' next_open_to_close_hold")
+        print("Example (canonical multi-day):")
+        print("  python parameter_sweep_tester.py SPY 2015-01-01 2024-12-31 '1,3,5,10' next_open_to_open_hold")
         print()
         print("Example (intraday only):")
         print("  python parameter_sweep_tester.py SPY 2015-01-01 2024-12-31 '1' next_open_to_close")
@@ -1127,14 +1128,13 @@ def main():
         print(f"Error: Invalid forward horizons '{horizons_str}'. Use comma-separated integers like '1,5,10'")
         sys.exit(1)
 
-    execution_model = sys.argv[5] if len(sys.argv) > 5 else "next_open_to_close_hold"
+    execution_model = sys.argv[5] if len(sys.argv) > 5 else "next_open_to_open_hold"
     
-    # Warn if using wrong execution model for multi-day
-    if any(h > 1 for h in forward_horizons) and execution_model == "next_open_to_close":
-        print(f"\n⚠️  WARNING: Using 'next_open_to_close' with multi-day horizons {forward_horizons}")
-        print(f"   This measures INTRADAY on specific days, not true multi-day holds!")
-        print(f"   Use 'next_open_to_close_hold' instead for correct multi-day returns.")
-        print(f"   See: EXECUTION_MODEL_CRITICAL_FIX.md for details.\n")
+    # Warn when the requested model differs from the canonical open-to-open hold.
+    if any(h > 1 for h in forward_horizons) and execution_model in {"next_open_to_close", "next_open_to_close_hold"}:
+        print(f"\n⚠️  WARNING: Using '{execution_model}' with multi-day horizons {forward_horizons}")
+        print(f"   This will not match the canonical next-open to next-open holding convention.")
+        print(f"   Use 'next_open_to_open_hold' for pipeline-consistent multi-day returns.\n")
 
     for horizon in forward_horizons:
         print(f"\n\n{'#'*80}")

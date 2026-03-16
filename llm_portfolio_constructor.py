@@ -25,6 +25,7 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 import pandas as pd
 
+from portfolio_constraints import MIN_TRADE_PRICE, has_min_trade_price
 from technical_llm import construct_portfolio_from_universe
 
 # =============================================================================
@@ -160,6 +161,10 @@ def load_signal_data_preloaded(
         if pd.isna(direction_score) or pd.isna(magnitude_score):
             continue
 
+        adj_close = row.get("adj_close", np.nan)
+        if not has_min_trade_price(adj_close):
+            continue
+
         # Extract only the 17 LLM indicators from the composite CSV
         indicators = {}
         for col in LLM_INDICATOR_COLS:
@@ -170,7 +175,7 @@ def load_signal_data_preloaded(
         universe[ticker] = {
             "direction_score": float(direction_score),
             "magnitude_score": float(magnitude_score),
-            "adj_close": float(row.get("adj_close", 0)),
+            "adj_close": float(adj_close),
             "indicators": indicators,
         }
 
@@ -259,6 +264,7 @@ async def run_batch(
     print(f"Rebalance: every {rebalance_days} trading days")
     print(f"Model: {model}  |  Temperature: {temperature}")
     print(f"Top-N magnitude candidates shown to LLM: {top_n_magnitude}")
+    print(f"Min decision price: > ${MIN_TRADE_PRICE:.2f}")
     print(f"{'='*80}\n")
 
     # Load SPY calendar
@@ -283,6 +289,13 @@ async def run_batch(
     cache_filename = f"llm_portfolio_{start_date}_{end_date}_{rebalance_days}d.json"
     cache_path = CACHE_DIR / cache_filename
     cache = load_cache(cache_path) if resume else {"portfolios": {}, "metadata": {}}
+    cached_min_price = cache.get("metadata", {}).get("min_decision_price")
+    if resume and cache.get("portfolios") and cached_min_price != MIN_TRADE_PRICE:
+        print(
+            "⚠️  Existing cache was built with a different minimum decision price. "
+            "Rebuilding LLM portfolios with the new filter."
+        )
+        cache = {"portfolios": {}, "metadata": {}}
 
     cache["metadata"] = {
         "start_date": start_date,
@@ -291,6 +304,7 @@ async def run_batch(
         "model": model,
         "temperature": temperature,
         "top_n_magnitude": top_n_magnitude,
+        "min_decision_price": MIN_TRADE_PRICE,
         "total_rebalance_dates": len(rebalance_dates),
     }
 

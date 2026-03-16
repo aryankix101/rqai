@@ -151,7 +151,7 @@ class CompositeScoreCalculator:
         # Validate required columns
         # Support multiple forward return horizons: 5d, 10d, 20d, 30d, 60d
         forward_horizons = [5, 10, 20, 30, 60]
-        required_fwd_cols = set(["date", "adj_close", "fwd_1d_ret"])
+        required_fwd_cols = set(["date", "adj_open", "adj_close", "fwd_1d_ret"])
         for h in forward_horizons:
             required_fwd_cols.add(f"fwd_{h}d_ret")
             required_fwd_cols.add(f"fwd_abs_{h}d_ret")
@@ -232,7 +232,8 @@ class CompositeScoreCalculator:
         Step F: After Correction: D × E
         Step G: Weight (sum to 1.0)
         Step H: Contribution: F × G × 100
-        Final: Sum all contributions
+        Step I: Demean by subtracting 252-day rolling average
+        Final: Sum all contributions, then demean
         Uses DIRECTION_SIGNS and DIRECTION_WEIGHTS
         """
         contributions = []
@@ -256,13 +257,18 @@ class CompositeScoreCalculator:
             contributions.append(contribution)
 
         # Sum all contributions across all indicators
-        self.df["direction_score"] = pd.Series(np.nansum(contributions, axis=0), index=self.df.index)
+        raw_direction_score = pd.Series(np.nansum(contributions, axis=0), index=self.df.index)
+        
+        # Step I: Demean by subtracting 252-day rolling average
+        rolling_mean = raw_direction_score.rolling(window=252, min_periods=1).mean()
+        self.df["direction_score"] = raw_direction_score - rolling_mean
 
-        print(f"   ✓ Direction score computed")
+        print(f"   ✓ Direction score computed (with 252-day demeaning)")
         print(f"     Mean: {self.df['direction_score'].mean():.2f}")
         print(f"     Std:  {self.df['direction_score'].std():.2f}")
         print(f"     Min:  {self.df['direction_score'].min():.2f}")
         print(f"     Max:  {self.df['direction_score'].max():.2f}")
+        print(f"     Raw score mean (before demeaning): {raw_direction_score.mean():.2f}")
 
     def _compute_magnitude_score(self):
         """
@@ -563,7 +569,7 @@ class CompositeScoreCalculator:
         # Select columns to export
         # Include all forward horizons: 5d, 10d, 20d, 30d, 60d
         forward_horizons = [5, 10, 20, 30, 60]
-        base_cols = ["date", "adj_close", "fwd_1d_ret"]
+        base_cols = ["date", "adj_open", "adj_close", "fwd_1d_ret"]
         for h in forward_horizons:
             base_cols.append(f"fwd_{h}d_ret")
             base_cols.append(f"fwd_abs_{h}d_ret")

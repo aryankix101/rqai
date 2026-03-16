@@ -4,6 +4,10 @@ Reads portfolio_selections.csv files from factor_backtest output directories
 and generates a unified interactive HTML dashboard.
 
 Data conventions (from factor_backtest_engine.py):
+  Signal is generated on rebalance_date close.
+  Entry occurs on the next trading day's open.
+  Exit occurs on the later rebalance's execution open.
+
   LONG  return_col = (exit/entry - 1) * 100       positive if stock went up
   SHORT return_col = -(exit/entry - 1) * 100      positive if stock went DOWN (profit)
 
@@ -80,15 +84,15 @@ def discover_data() -> dict:
 def load_csv(csv_path: Path, horizon: int):
     """Load portfolio_selections.csv. Returns (df, return_col).
     
-    NOTE: Column is named realized_10d_return_pct but contains returns
-    for the actual rebalance horizon (5d, 10d, 20d, 30d, 60d).
+    NOTE: Older files use realized_10d_return_pct while newer files use
+    realized_return_pct. Both contain returns for the actual horizon.
     """
     df = pd.read_csv(csv_path)
     df["rebalance_date"] = pd.to_datetime(df["rebalance_date"])
 
-    # The column name is always realized_10d_return_pct, but it contains
-    # returns for the actual horizon (5d, 10d, 20d, 30d, 60d)
-    return_col = "realized_10d_return_pct"
+    return_col = "realized_return_pct"
+    if return_col not in df.columns:
+        return_col = "realized_10d_return_pct"
     if return_col not in df.columns:
         ret_cols = [c for c in df.columns if "return_pct" in c]
         if ret_cols:
@@ -146,10 +150,9 @@ def build_equity_curve(df: pd.DataFrame, return_col: str) -> pd.DataFrame:
         curr_short_tickers = set(period[period["position_type"] == "SHORT"]["ticker"].unique())
         
         # Turnover = sum of absolute weight changes
-        # NOTE: First period (i=0) is an ENTRY, not a rebalance, so no turnover costs
         if i == 0:
-            long_turnover = 0.0
-            short_turnover = 0.0
+            long_turnover = 1.0
+            short_turnover = 1.0
         else:
             # For equal-weight positions: exits + entries / (2 * N)
             # This measures what fraction of capital gets traded
@@ -260,8 +263,8 @@ def build_ic_filtered_equity_curve(df: pd.DataFrame, ic_df: pd.DataFrame, return
             
             # Turnover: from previous state (cash or positions) to current positions
             if in_cash:
-                # Coming from cash: all current positions are new
-                total_turnover = 1.0  # 100% turnover (all new)
+                # Coming from cash: opening both long and short books
+                total_turnover = 2.0
             else:
                 # Coming from positions: measure exits + entries / (2*N) per leg
                 long_exits = len(prev_long_tickers - curr_long_tickers)
@@ -285,13 +288,14 @@ def build_ic_filtered_equity_curve(df: pd.DataFrame, ic_df: pd.DataFrame, return
             prev_short_tickers = curr_short_tickers
             in_cash = False
         else:
-            # Stay in cash: no return, no cost
+            # Stay in cash. If we were invested previously, exiting both books costs 2 turns.
             period_ret = 0.0
-            period_ret_after_costs = 0.0
-            cost_bps = 0.0
+            total_turnover = 2.0 if not in_cash else 0.0
+            cost_bps = COST_RATE * total_turnover * 10000
+            cost_pct = cost_bps / 100.0
+            period_ret_after_costs = -cost_pct
             long_ret = 0.0
             short_ret = 0.0
-            total_turnover = 0.0
             in_cash = True  # Flag that we're in cash for next period's turnover calc
 
         rows.append({
