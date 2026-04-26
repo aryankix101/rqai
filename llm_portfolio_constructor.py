@@ -2,7 +2,7 @@
 LLM Portfolio Constructor — Batch Engine for A/B Testing
 
 For each rebalance date within the test window:
-  1. Reads direction_score, magnitude_score, and raw indicators from signal_data_dump CSVs
+  1. Reads direction_score, magnitude_score, and raw indicators from Russell close-only composite CSVs
   2. Reads composite scores from composite_scores CSVs
   3. Builds a universe dict for all tickers on that date
   4. Calls the LLM (construct_portfolio_from_universe) with dates masked
@@ -25,40 +25,33 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 import pandas as pd
 
-from portfolio_constraints import MIN_TRADE_PRICE, has_min_trade_price
-from technical_llm import construct_portfolio_from_universe
+from data_source_config import DATASET_VERSION, DEFAULT_COMPOSITE_SCORES_DIR, SPY_SIGNAL_DATA_PATH
+from indicator_feature_schema import (
+    CANONICAL_INDICATOR_FEATURES,
+    extract_canonical_indicator_features,
+)
+from llm_loss_memory import LossMemoryStore
+from portfolio_constraints import (
+    MIN_TRADE_PRICE,
+    filter_symbol_hygiene_frame,
+    has_min_trade_price,
+    row_has_clean_symbol_metadata,
+)
+from technical_llm import DEFAULT_MODEL, construct_portfolio_from_universe, model_supports_temperature
 
 # =============================================================================
 # Config
 # =============================================================================
 
-COMPOSITE_SCORES_DIR = Path("backtest_results/composite_scores")
-SPY_DATA_PATH = COMPOSITE_SCORES_DIR.parent / "signal_data_dump" / "signal_data_dump_SPY_1993-01-01_2025-12-31.csv"
+COMPOSITE_SCORES_DIR = DEFAULT_COMPOSITE_SCORES_DIR
+SPY_DATA_PATH = SPY_SIGNAL_DATA_PATH
 CACHE_DIR = Path("backtest_results/llm_portfolio_cache")
+CACHE_SCHEMA_VERSION = 2
+PROMPT_FORMAT_VERSION = "two_stage_signal_overlay_v4_pct_indicators"
 
 EXCLUDED_TICKERS = {"CPWR", "SPY"}
 
-# The 17 indicators the LLM actually sees (from composite scores)
-LLM_INDICATOR_COLS = [
-    "vix_percentile_252d",
-    "vol_percentile_504d",
-    "vix_level",
-    "vol_imbalance_20d",
-    "m2_m1_ratio",
-    "atr_14d_pct",
-    "realized_vol_10d",
-    "vol_adjusted_trend_ma100",
-    "range_pos_55d",
-    "pct_from_52w_high",
-    "range_pct",
-    "autocorr_5d",
-    "mom_3m",
-    "rsi_5d",
-    "vel_10d_over_vol",
-    "days_since_52w_high",
-    "vol_adjusted_trend_ma100_slope",
-    "pct_from_ma100",
-]
+LLM_INDICATOR_COLS = list(CANONICAL_INDICATOR_FEATURES)
 
 
 # =============================================================================
@@ -155,6 +148,8 @@ def load_signal_data_preloaded(
         if row.empty:
             continue
         row = row.iloc[0]
+        if not row_has_clean_symbol_metadata(row):
+            continue
 
         direction_score = row.get("direction_score", np.nan)
         magnitude_score = row.get("magnitude_score", np.nan)
@@ -165,17 +160,15 @@ def load_signal_data_preloaded(
         if not has_min_trade_price(adj_close):
             continue
 
-        # Extract only the 17 LLM indicators from the composite CSV
-        indicators = {}
-        for col in LLM_INDICATOR_COLS:
-            val = row.get(col, np.nan)
-            if pd.notna(val):
-                indicators[col] = float(val) if not isinstance(val, str) else val
+        # Extract indicator context using canonical names with percentile fallbacks.
+        indicators = extract_canonical_indicator_features(row, LLM_INDICATOR_COLS)
 
         universe[ticker] = {
             "direction_score": float(direction_score),
             "magnitude_score": float(magnitude_score),
             "adj_close": float(adj_close),
+            "asset_id": row.get("asset_id", ticker),
+            "source_column": row.get("source_column", row.get("asset_id", ticker)),
             "indicators": indicators,
         }
 
@@ -194,6 +187,8 @@ def preload_all_data() -> Dict[str, pd.DataFrame]:
     """
     print("📂 Preloading composite score CSVs...")
     composite_dfs = {}
+    filtered_rows = 0
+    touched_tickers = 0
     for csv_file in sorted(COMPOSITE_SCORES_DIR.glob("*.csv")):
         try:
             parts = csv_file.stem.split("_")
@@ -202,10 +197,23 @@ def preload_all_data() -> Dict[str, pd.DataFrame]:
                 continue
             df = pd.read_csv(csv_file, parse_dates=["date"])
             df = df.sort_values("date").reset_index(drop=True)
+            cleaned = filter_symbol_hygiene_frame(df)
+            removed = len(df) - len(cleaned)
+            if removed > 0:
+                filtered_rows += removed
+                touched_tickers += 1
+            df = cleaned
+            if df.empty:
+                continue
             composite_dfs[ticker] = df
         except Exception:
             continue
     print(f"   ✓ Loaded {len(composite_dfs)} composite score files\n")
+    if filtered_rows > 0:
+        print(
+            "   ✓ Symbol hygiene filter removed "
+            f"{filtered_rows} ambiguous/recycled rows across {touched_tickers} tickers\n"
+        )
 
     return composite_dfs
 
@@ -219,7 +227,7 @@ def load_cache(cache_path: Path) -> Dict[str, Any]:
     if cache_path.exists():
         with open(cache_path, "r") as f:
             return json.load(f)
-    return {"portfolios": {}, "metadata": {}}
+    return {"portfolios": {}, "metadata": {}, "failures": {}}
 
 
 def save_cache(cache: Dict[str, Any], cache_path: Path):
@@ -227,6 +235,76 @@ def save_cache(cache: Dict[str, Any], cache_path: Path):
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "w") as f:
         json.dump(cache, f, indent=2, default=str)
+
+
+def prompt_style_label(turnover_aware: bool) -> str:
+    """Return the cache/output label for the prompt variant."""
+    return "turnover_aware" if turnover_aware else "signal_only"
+
+
+def build_cache_filename(
+    start_date: str,
+    end_date: str,
+    rebalance_days: int,
+    use_equal_weight: bool,
+    turnover_aware: bool,
+    enable_loss_memory: bool = False,
+    loss_memory_top_k: int = 3,
+    loss_memory_max_targets_per_side: int = 4,
+) -> str:
+    """Build a cache filename that preserves prompt and execution variants."""
+    execution_mode = "equal_weight" if use_equal_weight else "llm_weighted"
+    prompt_style = prompt_style_label(turnover_aware)
+    loss_memory_suffix = ""
+    if enable_loss_memory:
+        loss_memory_suffix = f"_lossmem_k{int(loss_memory_top_k)}_t{int(loss_memory_max_targets_per_side)}"
+    return (
+        f"llm_portfolio_{start_date}_{end_date}_{rebalance_days}d_"
+        f"{execution_mode}_{prompt_style}_{DATASET_VERSION}{loss_memory_suffix}.json"
+    )
+
+
+def _cache_is_compatible(
+    cache: Dict[str, Any],
+    execution_mode: str,
+    turnover_aware: bool,
+    enable_loss_memory: bool,
+    loss_memory_top_k: int,
+    loss_memory_max_targets_per_side: int,
+) -> bool:
+    """Reject legacy or fallback-generated caches."""
+    metadata = cache.get("metadata", {})
+    if metadata.get("schema_version") != CACHE_SCHEMA_VERSION:
+        return False
+    if metadata.get("execution_mode") != execution_mode:
+        return False
+    if metadata.get("turnover_aware") != turnover_aware:
+        return False
+    if metadata.get("prompt_style") != prompt_style_label(turnover_aware):
+        return False
+    if metadata.get("prompt_format_version") != PROMPT_FORMAT_VERSION:
+        return False
+    if bool(metadata.get("loss_memory_enabled", False)) != bool(enable_loss_memory):
+        return False
+    if int(metadata.get("loss_memory_top_k", 3)) != int(loss_memory_top_k):
+        return False
+    if int(metadata.get("loss_memory_max_targets_per_side", 4)) != int(loss_memory_max_targets_per_side):
+        return False
+    if metadata.get("llm_source_policy") != "strict_llm_only":
+        return False
+    if metadata.get("source_dataset") != DATASET_VERSION:
+        return False
+
+    for portfolio in cache.get("portfolios", {}).values():
+        if portfolio.get("llm_source") != "llm":
+            return False
+        for side_key in ("long_basket", "short_basket"):
+            for entry in portfolio.get(side_key, []):
+                if entry.get("llm_source") != "llm":
+                    return False
+                if "weight_raw" not in entry or "weight_exec" not in entry:
+                    return False
+    return True
 
 
 # =============================================================================
@@ -240,8 +318,13 @@ async def run_batch(
     resume: bool = True,
     temperature: float = 0.15,
     top_n_magnitude: int = 60,
-    model: str = "deepseek-chat",
+    model: str = DEFAULT_MODEL,
     rate_limit_delay: float = 2.0,
+    use_equal_weight: bool = False,
+    turnover_aware: bool = False,
+    enable_loss_memory: bool = False,
+    loss_memory_top_k: int = 3,
+    loss_memory_max_targets_per_side: int = 4,
 ):
     """Run LLM portfolio construction for all rebalance dates in window.
 
@@ -262,9 +345,19 @@ async def run_batch(
     print(f"LLM PORTFOLIO CONSTRUCTOR — BATCH MODE")
     print(f"Test Window: {start_date} to {end_date}")
     print(f"Rebalance: every {rebalance_days} trading days")
-    print(f"Model: {model}  |  Temperature: {temperature}")
+    temperature_label = f"{temperature}" if model_supports_temperature(model) else f"{temperature} (ignored by model)"
+    print(f"Model: {model}  |  Temperature: {temperature_label}")
     print(f"Top-N magnitude candidates shown to LLM: {top_n_magnitude}")
     print(f"Min decision price: > ${MIN_TRADE_PRICE:.2f}")
+    print(f"Execution mode: {'equal_weight' if use_equal_weight else 'llm_weighted'}")
+    print(f"LLM prompt: {prompt_style_label(turnover_aware)}")
+    if enable_loss_memory:
+        print(
+            "Loss memory: enabled "
+            f"(top_k={loss_memory_top_k}, targets/side={loss_memory_max_targets_per_side})"
+        )
+    else:
+        print("Loss memory: disabled")
     print(f"{'='*80}\n")
 
     # Load SPY calendar
@@ -286,18 +379,42 @@ async def run_batch(
     composite_dfs = preload_all_data()
 
     # Cache setup
-    cache_filename = f"llm_portfolio_{start_date}_{end_date}_{rebalance_days}d.json"
+    cache_filename = build_cache_filename(
+        start_date=start_date,
+        end_date=end_date,
+        rebalance_days=rebalance_days,
+        use_equal_weight=use_equal_weight,
+        turnover_aware=turnover_aware,
+        enable_loss_memory=enable_loss_memory,
+        loss_memory_top_k=loss_memory_top_k,
+        loss_memory_max_targets_per_side=loss_memory_max_targets_per_side,
+    )
     cache_path = CACHE_DIR / cache_filename
-    cache = load_cache(cache_path) if resume else {"portfolios": {}, "metadata": {}}
+    execution_mode = "equal_weight" if use_equal_weight else "llm_weighted"
+    cache = load_cache(cache_path) if resume else {"portfolios": {}, "metadata": {}, "failures": {}}
     cached_min_price = cache.get("metadata", {}).get("min_decision_price")
     if resume and cache.get("portfolios") and cached_min_price != MIN_TRADE_PRICE:
         print(
             "⚠️  Existing cache was built with a different minimum decision price. "
             "Rebuilding LLM portfolios with the new filter."
         )
-        cache = {"portfolios": {}, "metadata": {}}
+        cache = {"portfolios": {}, "metadata": {}, "failures": {}}
+    elif resume and cache.get("portfolios") and not _cache_is_compatible(
+        cache,
+        execution_mode,
+        turnover_aware,
+        enable_loss_memory,
+        loss_memory_top_k,
+        loss_memory_max_targets_per_side,
+    ):
+        print(
+            "⚠️  Existing cache uses a legacy or incompatible schema. "
+            "Ignoring it and rebuilding strict LLM portfolios."
+        )
+        cache = {"portfolios": {}, "metadata": {}, "failures": {}}
 
     cache["metadata"] = {
+        "schema_version": CACHE_SCHEMA_VERSION,
         "start_date": start_date,
         "end_date": end_date,
         "rebalance_days": rebalance_days,
@@ -305,10 +422,29 @@ async def run_batch(
         "temperature": temperature,
         "top_n_magnitude": top_n_magnitude,
         "min_decision_price": MIN_TRADE_PRICE,
+        "execution_mode": execution_mode,
+        "turnover_aware": turnover_aware,
+        "prompt_style": prompt_style_label(turnover_aware),
+        "prompt_format_version": PROMPT_FORMAT_VERSION,
+        "ambiguous_pool_in_prompt": False,
+        "loss_memory_enabled": bool(enable_loss_memory),
+        "loss_memory_top_k": int(loss_memory_top_k),
+        "loss_memory_max_targets_per_side": int(loss_memory_max_targets_per_side),
+        "llm_source_policy": "strict_llm_only",
+        "source_dataset": DATASET_VERSION,
+        "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
         "total_rebalance_dates": len(rebalance_dates),
     }
+    cache.setdefault("failures", {})
 
-    # Track previous portfolio for cost-aware rebalancing
+    loss_memory_store = None
+    if enable_loss_memory:
+        loss_memory_store = LossMemoryStore(
+            top_k=loss_memory_top_k,
+            max_targets_per_side=loss_memory_max_targets_per_side,
+        )
+
+    # Track previous portfolio for continuity across rebalances
     previous_portfolio = None
     completed = 0
     skipped = 0
@@ -316,6 +452,13 @@ async def run_batch(
 
     for i, rebal_date in enumerate(rebalance_dates):
         date_str = pd.Timestamp(rebal_date).strftime("%Y-%m-%d")
+
+        if loss_memory_store is not None and previous_portfolio is not None:
+            loss_memory_store.finalize_portfolio(
+                entry_portfolio=previous_portfolio,
+                exit_date=pd.Timestamp(rebal_date),
+                composite_dfs=composite_dfs,
+            )
 
         # Skip if already cached
         if resume and date_str in cache["portfolios"]:
@@ -340,6 +483,23 @@ async def run_batch(
 
         print(f"      Universe: {len(universe)} stocks  |  Regime: {regime}")
 
+        loss_memory_context = ""
+        if loss_memory_store is not None:
+            memory_payload = loss_memory_store.build_prompt_context(
+                universe=universe,
+                previous_portfolio=previous_portfolio if turnover_aware else None,
+                regime=regime,
+                as_of_date=pd.Timestamp(rebal_date),
+                top_n_magnitude=top_n_magnitude,
+            )
+            loss_memory_context = memory_payload.get("text", "")
+            if memory_payload.get("case_count", 0) > 0:
+                print(
+                    "      Loss memory: "
+                    f"{memory_payload['target_count']} targets, "
+                    f"{memory_payload['case_count']} retrieved loss cases"
+                )
+
         # Call LLM
         try:
             t0 = time.time()
@@ -352,6 +512,9 @@ async def run_batch(
                 model=model,
                 temperature=temperature,
                 top_n_magnitude=top_n_magnitude,
+                use_equal_weight=use_equal_weight,
+                turnover_aware=turnover_aware,
+                loss_memory_context=loss_memory_context,
             )
             elapsed = time.time() - t0
 
@@ -359,16 +522,23 @@ async def run_batch(
             n_short = len(portfolio.get("short_basket", []))
             conf = portfolio.get("confidence", 0)
             kept = len(portfolio.get("kept_from_previous", []))
+            provider_usage = portfolio.get("llm_usage", {}).get("provider_usage", {})
+            total_tokens = provider_usage.get("total_tokens")
+            if total_tokens is None:
+                total_tokens = portfolio.get("llm_usage", {}).get("approx_total_tokens")
+            token_segment = f" | Tokens: {int(total_tokens)}" if total_tokens is not None else ""
 
             print(
                 f"      ✓ {n_long}L / {n_short}S | "
                 f"Confidence: {conf:.2f} | "
                 f"Kept: {kept} positions | "
                 f"{elapsed:.1f}s"
+                f"{token_segment}"
             )
 
             # Save to cache
             cache["portfolios"][date_str] = portfolio
+            cache["failures"].pop(date_str, None)
             save_cache(cache, cache_path)
 
             # Track for next iteration
@@ -378,6 +548,16 @@ async def run_batch(
         except Exception as e:
             print(f"      ❌ Error: {e}")
             failed += 1
+            cache["failures"][date_str] = {
+                "rebalance_date": date_str,
+                "error": str(e),
+                "regime": regime,
+                "execution_mode": execution_mode,
+                "turnover_aware": turnover_aware,
+                "timestamp": pd.Timestamp.utcnow().isoformat(),
+            }
+            save_cache(cache, cache_path)
+            continue
 
         # Rate limiting
         if i < len(rebalance_dates) - 1:
@@ -406,10 +586,33 @@ def main():
     parser.add_argument("--rebalance-days", type=int, default=10, help="Rebalance frequency (default: 10)")
     parser.add_argument("--resume", action="store_true", default=True, help="Resume from cache (default: True)")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh, ignore cache")
-    parser.add_argument("--temperature", type=float, default=0.3, help="LLM temperature (default: 0.3)")
+    parser.add_argument("--temperature", type=float, default=0.6, help="LLM temperature (default: 0.6; ignored by deepseek-reasoner)")
     parser.add_argument("--top-n", type=int, default=60, help="Top-N magnitude candidates for LLM (default: 60)")
-    parser.add_argument("--model", default="deepseek-chat", help="DeepSeek model name (default: deepseek-chat)")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"DeepSeek model name (default: {DEFAULT_MODEL})")
     parser.add_argument("--rate-limit", type=float, default=2.0, help="Delay between API calls in seconds")
+    parser.add_argument("--equal-weight", action="store_true", help="Override LLM sizing and execute each leg equal-weighted")
+    parser.add_argument(
+        "--turnover-aware",
+        action="store_true",
+        help="Tell the LLM to minimize turnover and preserve positions to save trading costs",
+    )
+    parser.add_argument(
+        "--enable-loss-memory",
+        action="store_true",
+        help="Retrieve top-k similar prior loss cases and include them in the LLM prompt",
+    )
+    parser.add_argument(
+        "--loss-memory-top-k",
+        type=int,
+        default=3,
+        help="Number of similar loss cases to retrieve per target (default: 3)",
+    )
+    parser.add_argument(
+        "--loss-memory-max-targets-per-side",
+        type=int,
+        default=4,
+        help="Maximum reviewed names per side for loss-memory retrieval (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -425,6 +628,11 @@ def main():
             top_n_magnitude=args.top_n,
             model=args.model,
             rate_limit_delay=args.rate_limit,
+            use_equal_weight=args.equal_weight,
+            turnover_aware=args.turnover_aware,
+            enable_loss_memory=args.enable_loss_memory,
+            loss_memory_top_k=args.loss_memory_top_k,
+            loss_memory_max_targets_per_side=args.loss_memory_max_targets_per_side,
         )
     )
 

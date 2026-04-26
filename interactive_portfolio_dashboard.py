@@ -19,6 +19,7 @@ Data conventions (from factor_backtest_engine.py):
 """
 
 import sys
+import argparse
 import json
 import traceback
 import numpy as np
@@ -78,6 +79,80 @@ def discover_data() -> dict:
     return found
 
 
+def _parse_horizon_from_dir_name(name: str) -> int | None:
+    if not name.endswith("d_horizon"):
+        return None
+    try:
+        return int(name.replace("d_horizon", ""))
+    except ValueError:
+        return None
+
+
+def _register_score_dir(found: dict, score_dir: Path) -> None:
+    csv_path = score_dir / "portfolio_selections.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing portfolio_selections.csv in {score_dir}")
+
+    if score_dir.name not in {"direction_score", "magnitude_score"}:
+        raise ValueError(f"Expected a score-type dir, got {score_dir}")
+
+    horizon_dir = score_dir.parent
+    variant_dir = horizon_dir.parent
+    horizon = _parse_horizon_from_dir_name(horizon_dir.name)
+    if horizon is None:
+        raise ValueError(f"Could not parse horizon from {horizon_dir}")
+
+    found.setdefault(variant_dir.name, {})[horizon] = csv_path
+
+
+def discover_data_from_paths(input_paths: list[str]) -> dict:
+    """
+    Accept explicit paths to a result variant / horizon / score dir / CSV and
+    normalize them into the same structure as discover_data().
+    """
+    found = {}
+    for raw in input_paths:
+        path = Path(raw).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Input path not found: {path}")
+
+        if path.is_file():
+            if path.name != "portfolio_selections.csv":
+                raise ValueError(f"Expected portfolio_selections.csv, got {path}")
+            _register_score_dir(found, path.parent)
+            continue
+
+        if path.name in {"direction_score", "magnitude_score"}:
+            _register_score_dir(found, path)
+            continue
+
+        horizon = _parse_horizon_from_dir_name(path.name)
+        if horizon is not None:
+            score_dir = path / "direction_score"
+            _register_score_dir(found, score_dir)
+            continue
+
+        # Treat as a variant dir and scan horizon children.
+        found_variant = False
+        for horizon_dir in sorted(path.iterdir()):
+            if not horizon_dir.is_dir():
+                continue
+            horizon = _parse_horizon_from_dir_name(horizon_dir.name)
+            if horizon is None:
+                continue
+            score_dir = horizon_dir / "direction_score"
+            if score_dir.exists():
+                _register_score_dir(found, score_dir)
+                found_variant = True
+        if not found_variant:
+            raise ValueError(
+                f"Could not find a valid direction_score result under {path}. "
+                "Pass a variant dir, a 10d_horizon dir, a direction_score dir, or portfolio_selections.csv."
+            )
+
+    return found
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA LOADING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +192,57 @@ def load_csv(csv_path: Path, horizon: int):
     return df, return_col
 
 
+def load_engine_outputs(score_dir: Path):
+    """
+    Load saved engine outputs when available so charts match factor_pnl.csv
+    instead of reconstructing from portfolio_selections.csv.
+    """
+    pnl_path = score_dir / "factor_pnl.csv"
+    review_path = score_dir / "review_log.csv"
+
+    pnl_df = None
+    review_log_df = None
+
+    if pnl_path.exists():
+        pnl_df = pd.read_csv(pnl_path, parse_dates=["date"])
+        for col in [
+            "daily_ret_bps",
+            "gross_daily_ret_bps",
+            "net_daily_ret_bps",
+            "long_pnl_bps",
+            "short_pnl_bps",
+            "cost_bps_applied",
+            "turnover_total",
+            "turnover_long",
+            "turnover_short",
+            "cumulative_ret_pct",
+            "daily_ret",
+            "cumulative_ret",
+        ]:
+            if col in pnl_df.columns:
+                pnl_df[col] = pd.to_numeric(pnl_df[col], errors="coerce")
+
+    if review_path.exists():
+        parse_cols = [c for c in ["review_date", "signal_date"] if c in pd.read_csv(review_path, nrows=0).columns]
+        review_log_df = pd.read_csv(review_path, parse_dates=parse_cols)
+        for col in [
+            "turnover_total",
+            "turnover_long",
+            "turnover_short",
+            "cost_bps_applied",
+            "candidate_longs",
+            "candidate_shorts",
+            "long_entries",
+            "long_exits",
+            "short_entries",
+            "short_exits",
+        ]:
+            if col in review_log_df.columns:
+                review_log_df[col] = pd.to_numeric(review_log_df[col], errors="coerce")
+
+    return pnl_df, review_log_df
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ANALYTICS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,17 +280,17 @@ def build_equity_curve(df: pd.DataFrame, return_col: str) -> pd.DataFrame:
             long_turnover = 1.0
             short_turnover = 1.0
         else:
-            # For equal-weight positions: exits + entries / (2 * N)
-            # This measures what fraction of capital gets traded
+            # Match the backtest engine's equal-weight turnover:
+            # each exit or entry trades 1/N of capital within that leg.
             long_exits = len(prev_long_tickers - curr_long_tickers)
             long_entries = len(curr_long_tickers - prev_long_tickers)
             long_n = max(len(curr_long_tickers), 1)
-            long_turnover = (long_exits + long_entries) / (2.0 * long_n)
+            long_turnover = (long_exits + long_entries) / long_n
             
             short_exits = len(prev_short_tickers - curr_short_tickers)
             short_entries = len(curr_short_tickers - prev_short_tickers)
             short_n = max(len(curr_short_tickers), 1)
-            short_turnover = (short_exits + short_entries) / (2.0 * short_n)
+            short_turnover = (short_exits + short_entries) / short_n
         
         total_turnover = long_turnover + short_turnover
         
@@ -212,6 +338,31 @@ def build_equity_curve(df: pd.DataFrame, return_col: str) -> pd.DataFrame:
     daily["equity"]               = daily["equity"].ffill().fillna(1)
 
     return daily
+
+
+def build_equity_curve_from_pnl(pnl_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize factor_pnl.csv into the dashboard's equity_df schema.
+    Values are kept at daily frequency, matching the engine output exactly.
+    """
+    eq = pnl_df.copy().sort_values("date").reset_index(drop=True)
+    eq["period_ret_gross"] = pd.to_numeric(eq.get("gross_daily_ret_bps"), errors="coerce").fillna(0.0) / 100.0
+    eq["period_ret_net"] = pd.to_numeric(eq.get("net_daily_ret_bps"), errors="coerce").fillna(0.0) / 100.0
+    eq["long_ret"] = pd.to_numeric(eq.get("long_pnl_bps"), errors="coerce").fillna(0.0) / 100.0
+    eq["short_ret"] = pd.to_numeric(eq.get("short_pnl_bps"), errors="coerce").fillna(0.0) / 100.0
+    eq["turnover"] = pd.to_numeric(eq.get("turnover_total"), errors="coerce").fillna(0.0)
+    eq["cost_bps"] = pd.to_numeric(eq.get("cost_bps_applied"), errors="coerce").fillna(0.0)
+    if "cumulative_return_pct" not in eq.columns:
+        eq["cumulative_return_pct"] = pd.to_numeric(eq.get("cumulative_ret_pct"), errors="coerce").fillna(0.0)
+    else:
+        eq["cumulative_return_pct"] = pd.to_numeric(eq["cumulative_return_pct"], errors="coerce").fillna(0.0)
+    if "equity" not in eq.columns:
+        eq["equity"] = 1.0 + eq["cumulative_return_pct"] / 100.0
+    else:
+        eq["equity"] = pd.to_numeric(eq["equity"], errors="coerce").fillna(1.0 + eq["cumulative_return_pct"] / 100.0)
+    eq.attrs["periods_per_year"] = 252.0
+    eq.attrs["source"] = "factor_pnl"
+    return eq
 
 
 def build_ic_filtered_equity_curve(df: pd.DataFrame, ic_df: pd.DataFrame, return_col: str) -> pd.DataFrame:
@@ -266,16 +417,17 @@ def build_ic_filtered_equity_curve(df: pd.DataFrame, ic_df: pd.DataFrame, return
                 # Coming from cash: opening both long and short books
                 total_turnover = 2.0
             else:
-                # Coming from positions: measure exits + entries / (2*N) per leg
+                # Match the backtest engine's equal-weight turnover:
+                # each exit or entry trades 1/N of capital within that leg.
                 long_exits = len(prev_long_tickers - curr_long_tickers)
                 long_entries = len(curr_long_tickers - prev_long_tickers)
                 long_n = max(len(curr_long_tickers), 1)
-                long_turnover = (long_exits + long_entries) / (2.0 * long_n)
+                long_turnover = (long_exits + long_entries) / long_n
                 
                 short_exits = len(prev_short_tickers - curr_short_tickers)
                 short_entries = len(curr_short_tickers - prev_short_tickers)
                 short_n = max(len(curr_short_tickers), 1)
-                short_turnover = (short_exits + short_entries) / (2.0 * short_n)
+                short_turnover = (short_exits + short_entries) / short_n
                 
                 total_turnover = long_turnover + short_turnover
             
@@ -510,6 +662,26 @@ def compute_turnover_attribution(df: pd.DataFrame) -> pd.DataFrame:
         prev_long  = curr_long
         prev_short = curr_short
 
+    return pd.DataFrame(rows)
+
+
+def compute_turnover_attribution_from_review_log(review_log_df: pd.DataFrame) -> pd.DataFrame:
+    if review_log_df is None or review_log_df.empty:
+        return pd.DataFrame()
+    if "review_date" not in review_log_df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in review_log_df.sort_values("review_date").iterrows():
+        rows.append({
+            "date": row["review_date"],
+            "long_entries": int(row.get("long_entries", 0) or 0),
+            "long_exits": int(row.get("long_exits", 0) or 0),
+            "long_persists": int(max((row.get("num_longs_after", 0) or 0) - (row.get("long_entries", 0) or 0), 0)),
+            "short_entries": int(row.get("short_entries", 0) or 0),
+            "short_exits": int(row.get("short_exits", 0) or 0),
+            "short_persists": int(max((row.get("num_shorts_after", 0) or 0) - (row.get("short_entries", 0) or 0), 0)),
+        })
     return pd.DataFrame(rows)
 
 
@@ -768,54 +940,36 @@ def chart_deciles(decile_df: pd.DataFrame, horizon: int) -> go.Figure:
 
 
 def chart_cost_impact(equity_df: pd.DataFrame, horizon: int) -> go.Figure:
-    """Compare gross vs net returns to show cumulative cost drag."""
+    """Show gross vs net cumulative return paths."""
     # Build gross equity curve (no costs)
     eq_rebal = equity_df.dropna(subset=["period_ret_gross"])
     gross_equity = (1 + eq_rebal["period_ret_gross"] / 100.0).cumprod()
     gross_cumret = (gross_equity - 1) * 100
-    
+
     # Net equity curve (with costs) already in equity_df
     net_cumret = eq_rebal["cumulative_return_pct"]
-    
+
     dates_str = eq_rebal["date"].dt.strftime("%Y-%m-%d").tolist()
-    
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=dates_str, y=gross_cumret.values,
-        mode="lines", name="Gross Return (before costs)",
+        mode="lines", name="Gross Cumulative Return",
         line=dict(color="#58a6ff", width=2.5),
         fill="tozeroy", fillcolor="rgba(88,166,255,0.08)",
         hovertemplate="<b>%{x}</b><br>Gross: %{y:.2f}%<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=dates_str, y=net_cumret.values,
-        mode="lines", name="Net Return (after costs)",
+        mode="lines", name="Net Cumulative Return",
         line=dict(color="#3fb950", width=2.5),
         fill="tozeroy", fillcolor="rgba(63,185,80,0.08)",
         hovertemplate="<b>%{x}</b><br>Net: %{y:.2f}%<extra></extra>",
     ))
-    
-    # Fill between to show cost drag
-    fig.add_trace(go.Scatter(
-        x=dates_str, y=gross_cumret.values,
-        fill=None,
-        mode="lines",
-        line_color="rgba(255,0,0,0)",
-        showlegend=False,
-    ))
-    fig.add_trace(go.Scatter(
-        x=dates_str, y=net_cumret.values,
-        fill="tonexty",
-        mode="lines",
-        line_color="rgba(255,0,0,0)",
-        name="Cost Drag",
-        fillcolor="rgba(248,81,73,0.15)",
-        hovertemplate="<extra></extra>",
-    ))
-    
+
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.2)")
     fig.update_layout(**_THEME, height=420,
-                      title=f"Transaction Cost Impact — {horizon}d Horizon",
+                      title=f"Gross vs Net Cumulative Return — {horizon}d Horizon",
                       xaxis_title="Date", yaxis_title="Cumulative Return (%)",
                       hovermode="x unified")
     return fig
@@ -1074,38 +1228,38 @@ def chart_turnover_attribution(turnover_attr_df: pd.DataFrame, horizon: int) -> 
 
 
 def chart_implementation_shortfall(equity_df: pd.DataFrame, horizon: int) -> go.Figure:
-    """Cumulative implementation shortfall = sum of per-period cost drag."""
-    eq_rebal = equity_df.dropna(subset=["period_ret_gross", "period_ret_net"]).copy()
+    """Arithmetic cumulative fees paid through time."""
+    eq_rebal = equity_df.dropna(subset=["cost_bps"]).copy()
     if eq_rebal.empty:
         fig = go.Figure()
         fig.update_layout(**_THEME, height=400,
-                          title=f"Implementation Shortfall — {horizon}d (no data)")
+                          title=f"Cumulative Fees Paid — {horizon}d (no data)")
         return fig
 
-    per_period_cost = eq_rebal["period_ret_gross"] - eq_rebal["period_ret_net"]
-    cum_shortfall   = per_period_cost.cumsum()
-    dates_str       = eq_rebal["date"].dt.strftime("%Y-%m-%d").tolist()
+    per_period_cost_pct = eq_rebal["cost_bps"] / 100.0
+    cum_fees_paid = per_period_cost_pct.cumsum()
+    dates_str = eq_rebal["date"].dt.strftime("%Y-%m-%d").tolist()
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=dates_str, y=cum_shortfall.values,
-        mode="lines", name="Cumulative Shortfall",
+        x=dates_str, y=cum_fees_paid.values,
+        mode="lines", name="Cumulative Fees Paid",
         line=dict(color="#f85149", width=2.5),
         fill="tozeroy", fillcolor="rgba(248,81,73,0.10)",
-        hovertemplate="<b>%{x}</b><br>Cum. Shortfall: %{y:.3f}%<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>Cum. Fees: %{y:.2f}%<extra></extra>",
     ))
     fig.add_trace(go.Bar(
-        x=dates_str, y=per_period_cost.values,
-        name="Per-Period Cost",
+        x=dates_str, y=per_period_cost_pct.values,
+        name="Per-Period Fee",
         marker_color="rgba(88,166,255,0.45)",
-        hovertemplate="<b>%{x}</b><br>Period Cost: %{y:.4f}%<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>Period Fee: %{y:.2f}%<extra></extra>",
     ))
-    total = cum_shortfall.iloc[-1] if len(cum_shortfall) > 0 else 0
+    total = cum_fees_paid.iloc[-1] if len(cum_fees_paid) > 0 else 0
     fig.update_layout(**_THEME, height=400,
-                      title=f"Implementation Shortfall — {horizon}d &nbsp; "
-                            f"(total cost drag: {total:.2f}%)",
+                      title=f"Cumulative Fees Paid — {horizon}d &nbsp; "
+                            f"(arithmetic total: {total:.2f}%)",
                       xaxis_title="Date",
-                      yaxis_title="Return Lost to Costs (%)",
+                      yaxis_title="Fees Paid (%)",
                       legend=dict(orientation="h", yanchor="bottom", y=1.02,
                                   xanchor="right", x=1))
     return fig
@@ -1234,10 +1388,12 @@ def build_holdings_data(df: pd.DataFrame, ic_df: pd.DataFrame, return_col: str) 
 
         holdings = []
         for _, row in day_df.sort_values("rank").iterrows():
+            rank_val = row.get("rank")
+            rank_out = int(rank_val) if pd.notna(rank_val) else None
             holdings.append({
                 "ticker":        str(row["ticker"]),
                 "position_type": str(row["position_type"]),
-                "rank":          int(row["rank"]),
+                "rank":          rank_out,
                 "score":         round(float(row["score"]), 3),
                 "entry_price":   round(float(row["entry_price"]), 2),
                 "exit_price":    round(float(row["exit_price"]), 2),
@@ -1272,6 +1428,26 @@ def build_holdings_data(df: pd.DataFrame, ic_df: pd.DataFrame, return_col: str) 
             "chart_json": _fig_dict(sc_fig),
         }
 
+    ticker_index = {}
+    for _, row in df.sort_values(["ticker", "rebalance_date"]).iterrows():
+        ticker = str(row["ticker"]).upper()
+        rank_val = row.get("rank")
+        rank_out = int(rank_val) if pd.notna(rank_val) else None
+        ticker_index.setdefault(ticker, []).append({
+            "rebalance_date": pd.Timestamp(row["rebalance_date"]).strftime("%Y-%m-%d"),
+            "signal_date": pd.Timestamp(row["signal_date"]).strftime("%Y-%m-%d") if pd.notna(row.get("signal_date")) else "",
+            "entry_date": pd.Timestamp(row["entry_date"]).strftime("%Y-%m-%d") if pd.notna(row.get("entry_date")) else "",
+            "exit_date": pd.Timestamp(row["exit_date"]).strftime("%Y-%m-%d") if pd.notna(row.get("exit_date")) else "",
+            "position_type": str(row["position_type"]),
+            "rank": rank_out,
+            "score": round(float(row["score"]), 3),
+            "entry_price": round(float(row["entry_price"]), 2),
+            "exit_price": round(float(row["exit_price"]), 2),
+            "pnl": round(float(row[return_col]), 3),
+            "raw_ret": round(float(row["raw_stock_return"]), 3),
+        })
+
+    dates_data["__ticker_index__"] = ticker_index
     return dates_data
 
 
@@ -1339,7 +1515,7 @@ def build_dashboard(all_variants: dict) -> str:
             years = max((last_d - first_d).days / 365.25, 0.01)
             cagr = (float(eq["equity"].iloc[-1]) ** (1 / years) - 1) * 100
             net_rets = eq["period_ret_net"].dropna()
-            periods_per_year = 252 / h
+            periods_per_year = float(eq.attrs.get("periods_per_year", 252 / h))
             sharpe = float((net_rets.mean() / net_rets.std() * np.sqrt(periods_per_year))
                            if len(net_rets) > 1 and net_rets.std() > 0 else 0)
             eq_vals = eq["equity"].values
@@ -1429,14 +1605,98 @@ def build_dashboard(all_variants: dict) -> str:
             for d in dates
         )
 
+    def make_extremes_html(h, variant):
+        d = all_variants[variant][h]
+        eq = d["equity_df"].copy()
+        df = d["df"].copy()
+        rc = d["return_col"]
+
+        eq = eq.dropna(subset=["date", "period_ret_net"]).copy()
+        if not eq.empty:
+            eq["date_str"] = pd.to_datetime(eq["date"]).dt.strftime("%Y-%m-%d")
+            eq["net_pct"] = pd.to_numeric(eq["period_ret_net"], errors="coerce").fillna(0.0)
+            eq["gross_pct"] = pd.to_numeric(eq["period_ret_gross"], errors="coerce").fillna(0.0)
+            eq["cost_pct"] = eq["gross_pct"] - eq["net_pct"]
+            best_days = eq.sort_values("net_pct", ascending=False).head(10)
+            worst_days = eq.sort_values("net_pct", ascending=True).head(10)
+        else:
+            best_days = pd.DataFrame()
+            worst_days = pd.DataFrame()
+
+        df = df.dropna(subset=[rc, "ticker"]).copy()
+        df["ret_pct"] = pd.to_numeric(df[rc], errors="coerce").fillna(0.0)
+        df["rebalance_date_str"] = pd.to_datetime(df["rebalance_date"]).dt.strftime("%Y-%m-%d")
+        best_stocks = df.sort_values("ret_pct", ascending=False).head(10)
+        worst_stocks = df.sort_values("ret_pct", ascending=True).head(10)
+
+        def render_day_rows(sub):
+            if sub.empty:
+                return '<tr><td colspan="4">No data</td></tr>'
+            rows = []
+            for _, row in sub.iterrows():
+                cls = "pos" if row["net_pct"] >= 0 else "neg"
+                rows.append(
+                    f"<tr><td><strong>{row['date_str']}</strong></td>"
+                    f"<td class=\"{cls}\">{row['net_pct']:+.2f}%</td>"
+                    f"<td>{row['gross_pct']:+.2f}%</td>"
+                    f"<td>{row['cost_pct']:+.2f}%</td></tr>"
+                )
+            return "".join(rows)
+
+        def render_stock_rows(sub):
+            if sub.empty:
+                return '<tr><td colspan="6">No data</td></tr>'
+            rows = []
+            for _, row in sub.iterrows():
+                cls = "pos" if row["ret_pct"] >= 0 else "neg"
+                rank_val = row.get("rank")
+                rank_txt = "—" if pd.isna(rank_val) else str(int(rank_val))
+                rows.append(
+                    f"<tr><td><strong>{row['ticker']}</strong></td>"
+                    f"<td>{row['rebalance_date_str']}</td>"
+                    f"<td>{row['position_type']}</td>"
+                    f"<td>{rank_txt}</td>"
+                    f"<td>{float(row['score']):.3f}</td>"
+                    f"<td class=\"{cls}\">{row['ret_pct']:+.2f}%</td></tr>"
+                )
+            return "".join(rows)
+
+        return f"""
+<div class="g2">
+  <div class="search-card">
+    <div class="search-title">Best Net Days</div>
+    <div class="search-sub">Top daily portfolio results after costs</div>
+    <table><thead><tr><th>Date</th><th>Net</th><th>Gross</th><th>Cost</th></tr></thead><tbody>{render_day_rows(best_days)}</tbody></table>
+  </div>
+  <div class="search-card">
+    <div class="search-title">Worst Net Days</div>
+    <div class="search-sub">Bottom daily portfolio results after costs</div>
+    <table><thead><tr><th>Date</th><th>Net</th><th>Gross</th><th>Cost</th></tr></thead><tbody>{render_day_rows(worst_days)}</tbody></table>
+  </div>
+</div>
+<div class="g2">
+  <div class="search-card">
+    <div class="search-title">Best Stock Episodes</div>
+    <div class="search-sub">Top individual position outcomes</div>
+    <table><thead><tr><th>Ticker</th><th>Rebalance</th><th>Side</th><th>Rank</th><th>Score</th><th>P&amp;L</th></tr></thead><tbody>{render_stock_rows(best_stocks)}</tbody></table>
+  </div>
+  <div class="search-card">
+    <div class="search-title">Worst Stock Episodes</div>
+    <div class="search-sub">Bottom individual position outcomes</div>
+    <table><thead><tr><th>Ticker</th><th>Rebalance</th><th>Side</th><th>Rank</th><th>Score</th><th>P&amp;L</th></tr></thead><tbody>{render_stock_rows(worst_stocks)}</tbody></table>
+  </div>
+</div>"""
+
     # Pre-generate all stats/regime/dates HTML
     stats_html_all = {}
     regime_html_all = {}
     dates_html_all = {}
+    extremes_html_all = {}
     for variant in variants:
         stats_html_all[variant] = {h: make_stats_html(h, all_stats[variant]) for h in horizons}
         regime_html_all[variant] = {h: make_regime_html(h, variant) for h in horizons}
         dates_html_all[variant] = {h: make_dates_html(h, variant) for h in horizons}
+        extremes_html_all[variant] = {h: make_extremes_html(h, variant) for h in horizons}
 
     # ── JavaScript blobs ─────────────────────────────────────────────────────
     charts_js   = f"const CHARTS = {json.dumps(all_charts)};"
@@ -1445,6 +1705,7 @@ def build_dashboard(all_variants: dict) -> str:
     stats_js    = f"const STATS_HTML = {json.dumps(stats_html_all)};"
     regime_js   = f"const REGIME_HTML = {json.dumps(regime_html_all)};"
     dates_js    = f"const DATES_HTML = {json.dumps(dates_html_all)};"
+    extremes_js = f"const EXTREMES_HTML = {json.dumps(extremes_html_all)};"
 
     # Variant and horizon buttons
     vbtn_html = "\n".join(
@@ -1505,16 +1766,25 @@ body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d1117;color:#e6edf3;m
 /* holdings */
 .controls{{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:18px;}}
 .controls label{{font-weight:600;color:#8b949e;font-size:.85em;}}
-.controls select{{background:#161b22;border:1px solid #30363d;color:#e6edf3;padding:7px 11px;border-radius:6px;font-size:.88em;min-width:170px;}}
+.controls select,.controls input{{background:#161b22;border:1px solid #30363d;color:#e6edf3;padding:7px 11px;border-radius:6px;font-size:.88em;min-width:170px;}}
 .pstats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:16px 0;}}
 .pscard{{background:#161b22;border:1px solid #30363d;border-radius:7px;padding:12px;}}
 .pslabel{{color:#8b949e;font-size:.72em;text-transform:uppercase;letter-spacing:.7px;margin-bottom:4px;}}
 .psval{{font-size:1.25em;font-weight:700;}}
+.search-results{{margin:12px 0 18px 0;}}
+.search-card{{background:#161b22;border:1px solid #30363d;border-radius:7px;padding:14px;margin-bottom:12px;}}
+.search-title{{font-size:1.02em;font-weight:700;margin-bottom:8px;}}
+.search-sub{{font-size:.82em;color:#8b949e;margin-bottom:10px;}}
+.search-grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px;}}
+.search-grid table{{width:100%;border-collapse:collapse;font-size:.84em;}}
+.search-grid th{{text-align:left;color:#8b949e;padding:6px 8px;border-bottom:1px solid #30363d;font-size:.75em;text-transform:uppercase;}}
+.search-grid td{{padding:6px 8px;border-bottom:1px solid #21262d;}}
 #htable-wrap table{{width:100%;border-collapse:collapse;font-size:.88em;margin-top:12px;}}
 #htable-wrap th{{background:#161b22;padding:9px 11px;text-align:left;color:#8b949e;font-weight:600;border-bottom:2px solid #30363d;font-size:.78em;text-transform:uppercase;letter-spacing:.5px;}}
 #htable-wrap td{{padding:8px 11px;border-bottom:1px solid #21262d;}}
 #htable-wrap tr:hover td{{background:#161b22;}}
 @media(max-width:900px){{.g2,.g3,.regime-grid{{grid-template-columns:1fr;}}.cbox,.cfull{{min-height:340px;}}}}
+@media(max-width:900px){{.search-grid{{grid-template-columns:1fr;}}}}
 </style>
 </head>
 <body>
@@ -1540,6 +1810,7 @@ body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d1117;color:#e6edf3;m
     <button class="stab" onclick="switchTab(event,'costs')">💸 Transaction Costs</button>
     <button class="stab" onclick="switchTab(event,'regimes')">🎯 IC Regimes</button>
     <button class="stab" onclick="switchTab(event,'deciles')">📊 Deciles</button>
+    <button class="stab" onclick="switchTab(event,'extremes')">🔥 Best & Worst</button>
     <button class="stab" onclick="switchTab(event,'crosshorizon')">📐 Cross-Horizon</button>
     <button class="stab" onclick="switchTab(event,'holdings')">📋 Holdings Explorer</button>
   </div>
@@ -1583,6 +1854,10 @@ body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d1117;color:#e6edf3;m
   <div id="sc-deciles" class="sc">
     <div class="cfull" id="c-deciles"></div>
   </div>
+  <!-- Best / Worst -->
+  <div id="sc-extremes" class="sc">
+    <div id="extremes-wrap"></div>
+  </div>
   <!-- Cross-Horizon -->
   <div id="sc-crosshorizon" class="sc">
     <div class="cfull" id="c-alpha-decay"></div>
@@ -1602,8 +1877,11 @@ body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d1117;color:#e6edf3;m
         <option value="ret_a">P&L ↑</option>
         <option value="score_d">Score ↓</option>
       </select>
+      <label>Ticker Search:</label>
+      <input id="tpicker" type="text" placeholder="e.g. MAXX, AAPL" oninput="onTickerSearch()" />
     </div>
     <div class="pstats" id="pstats" style="display:none;"></div>
+    <div class="search-results" id="search-results"></div>
     <div class="cfull" id="c-hscatter"></div>
     <div id="htable-wrap"></div>
   </div>
@@ -1616,6 +1894,7 @@ body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d1117;color:#e6edf3;m
 {stats_js}
 {regime_js}
 {dates_js}
+{extremes_js}
 
 var V = '{first_v}';
 var H = {first_h};
@@ -1629,9 +1908,12 @@ function switchV(v) {{
   
   document.getElementById('stats-wrap').innerHTML = STATS_HTML[V][H];
   document.getElementById('regime-wrap').innerHTML = REGIME_HTML[V][H];
+  document.getElementById('extremes-wrap').innerHTML = EXTREMES_HTML[V][H];
   var dp = document.getElementById('dpicker');
   dp.innerHTML = '<option value="">— select date —</option>' + DATES_HTML[V][H];
   document.getElementById('pstats').style.display = 'none';
+  document.getElementById('search-results').innerHTML = '';
+  document.getElementById('tpicker').value = '';
   document.getElementById('htable-wrap').innerHTML = '';
   document.getElementById('c-hscatter').innerHTML = '';
   renderCharts();
@@ -1644,9 +1926,12 @@ function switchH(h) {{
   document.getElementById('hbtn-' + h).classList.add('active');
   document.getElementById('stats-wrap').innerHTML = STATS_HTML[V][H];
   document.getElementById('regime-wrap').innerHTML = REGIME_HTML[V][H];
+  document.getElementById('extremes-wrap').innerHTML = EXTREMES_HTML[V][H];
   var dp = document.getElementById('dpicker');
   dp.innerHTML = '<option value="">— select date —</option>' + DATES_HTML[V][H];
   document.getElementById('pstats').style.display = 'none';
+  document.getElementById('search-results').innerHTML = '';
+  document.getElementById('tpicker').value = '';
   document.getElementById('htable-wrap').innerHTML = '';
   document.getElementById('c-hscatter').innerHTML = '';
   renderCharts();
@@ -1686,12 +1971,14 @@ function renderCharts() {{
     Plotly.react('c-cost-pct',       c.cost_pct.data,          c.cost_pct.layout,          cfg);
     ids = ['c-cost-impact', 'c-impl-shortfall', 'c-turnover-attr', 'c-turnover-costs', 'c-cost-pct'];
   }} else if (activeTab === 'regimes') {{
-    document.getElementById('regime-wrap').innerHTML = REGIME_HTML[H];
+    document.getElementById('regime-wrap').innerHTML = REGIME_HTML[V][H];
     Plotly.react('c-icreg',   c.ic_regimes.data, c.ic_regimes.layout, cfg);
     ids = ['c-icreg'];
   }} else if (activeTab === 'deciles') {{
     Plotly.react('c-deciles', c.deciles.data,    c.deciles.layout,    cfg);
     ids = ['c-deciles'];
+  }} else if (activeTab === 'extremes') {{
+    document.getElementById('extremes-wrap').innerHTML = EXTREMES_HTML[V][H];
   }} else if (activeTab === 'crosshorizon') {{
     var vc = CROSS_CHARTS[V];
     if (vc && vc.alpha_decay) {{
@@ -1712,6 +1999,11 @@ function renderCharts() {{
 function onDate() {{
   renderTable();
   renderHoldingsChart();
+}}
+
+function onTickerSearch() {{
+  renderTable();
+  renderSearchResults();
 }}
 
 function renderHoldingsChart() {{
@@ -1745,17 +2037,27 @@ function renderTable() {{
   document.getElementById('pstats').style.display = 'grid';
 
   var holdings = dd.holdings.slice();
+  var query = document.getElementById('tpicker').value.trim().toUpperCase();
+  if (query) {{
+    holdings = holdings.filter(function(h) {{ return (h.ticker || '').toUpperCase().includes(query); }});
+  }}
   var sort = document.getElementById('spicker').value;
-  if (sort === 'rank')    holdings.sort((a,b) => a.rank - b.rank);
+  if (sort === 'rank')    holdings.sort((a,b) => (a.rank ?? 999999) - (b.rank ?? 999999));
   if (sort === 'ret_d')   holdings.sort((a,b) => b.pnl - a.pnl);
   if (sort === 'ret_a')   holdings.sort((a,b) => a.pnl - b.pnl);
   if (sort === 'score_d') holdings.sort((a,b) => b.score - a.score);
+
+  if (holdings.length === 0) {{
+    document.getElementById('htable-wrap').innerHTML = '<p style="color:#8b949e;padding:16px;">No holdings match this ticker/date filter.</p>';
+    return;
+  }}
 
   var html = '<table><thead><tr><th>Rank</th><th>Ticker</th><th>Side</th><th>Score</th><th>Entry</th><th>Exit</th><th>Raw Ret</th><th>P&L</th></tr></thead><tbody>';
   holdings.forEach(function(h) {{
     var pc = h.pnl >= 0 ? 'pos' : 'neg';
     var rc = h.raw_ret >= 0 ? 'pos' : 'neg';
-    html += '<tr><td>' + h.rank + '</td><td><strong>' + h.ticker + '</strong></td>' +
+    var rankText = h.rank === null || h.rank === undefined ? '—' : h.rank;
+    html += '<tr><td>' + rankText + '</td><td><strong>' + h.ticker + '</strong></td>' +
             '<td>' + h.position_type + '</td>' +
             '<td>' + h.score.toFixed(3) + '</td>' +
             '<td>$' + h.entry_price.toFixed(2) + '</td>' +
@@ -1767,11 +2069,63 @@ function renderTable() {{
   document.getElementById('htable-wrap').innerHTML = html;
 }}
 
+function renderSearchResults() {{
+  var query = document.getElementById('tpicker').value.trim().toUpperCase();
+  var wrap = document.getElementById('search-results');
+  if (!query) {{
+    wrap.innerHTML = '';
+    return;
+  }}
+  var idx = HOLDINGS[V][H]['__ticker_index__'] || {{}};
+  var matches = Object.keys(idx).filter(function(t) {{ return t.includes(query); }}).sort();
+  if (matches.length === 0) {{
+    wrap.innerHTML = '<div class="search-card"><div class="search-title">Ticker Search</div><div class="search-sub">No ticker matches \"' + query + '\" in this variant/horizon.</div></div>';
+    return;
+  }}
+
+  function renderRows(rows) {{
+    return rows.map(function(r) {{
+      var pnlCls = r.pnl >= 0 ? 'pos' : 'neg';
+      var rankText = r.rank === null || r.rank === undefined ? '—' : r.rank;
+      return '<tr>' +
+        '<td><strong>' + r.rebalance_date + '</strong></td>' +
+        '<td>' + r.position_type + '</td>' +
+        '<td>' + rankText + '</td>' +
+        '<td>' + r.score.toFixed(3) + '</td>' +
+        '<td class="' + pnlCls + '">' + (r.pnl >= 0 ? '+' : '') + r.pnl.toFixed(2) + '%</td>' +
+        '<td>$' + r.entry_price.toFixed(2) + ' → $' + r.exit_price.toFixed(2) + '</td>' +
+      '</tr>';
+    }}).join('');
+  }}
+
+  var html = '';
+  matches.slice(0, 8).forEach(function(ticker) {{
+    var rows = idx[ticker].slice();
+    rows.sort(function(a,b) {{ return b.pnl - a.pnl; }});
+    var best = rows.slice(0, 5);
+    var worst = rows.slice().sort(function(a,b) {{ return a.pnl - b.pnl; }}).slice(0, 5);
+    var avg = rows.reduce(function(acc, r) {{ return acc + r.pnl; }}, 0) / Math.max(rows.length, 1);
+    html += '<div class="search-card">' +
+      '<div class="search-title">' + ticker + '</div>' +
+      '<div class="search-sub">Occurrences: ' + rows.length + ' · Average P&L: ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + '%</div>' +
+      '<div class="search-grid">' +
+      '<div><div class="search-sub">Best Winners</div><table><thead><tr><th>Date</th><th>Side</th><th>Rank</th><th>Score</th><th>P&L</th><th>Prices</th></tr></thead><tbody>' + renderRows(best) + '</tbody></table></div>' +
+      '<div><div class="search-sub">Worst Losers</div><table><thead><tr><th>Date</th><th>Side</th><th>Rank</th><th>Score</th><th>P&L</th><th>Prices</th></tr></thead><tbody>' + renderRows(worst) + '</tbody></table></div>' +
+      '</div></div>';
+  }});
+  if (matches.length > 8) {{
+    html += '<div class="search-card"><div class="search-sub">Showing first 8 ticker matches out of ' + matches.length + '.</div></div>';
+  }}
+  wrap.innerHTML = html;
+}}
+
 // Boot
 (function() {{
   document.getElementById('stats-wrap').innerHTML = STATS_HTML[V][H];
   document.getElementById('regime-wrap').innerHTML = REGIME_HTML[V][H];
+  document.getElementById('extremes-wrap').innerHTML = EXTREMES_HTML[V][H];
   document.getElementById('dpicker').innerHTML = '<option value="">— select date —</option>' + DATES_HTML[V][H];
+  document.getElementById('search-results').innerHTML = '';
   renderCharts();
 }})();
 </script>
@@ -1783,11 +2137,32 @@ function renderTable() {{
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    parser = argparse.ArgumentParser(
+        description="Generate an interactive HTML dashboard from factor backtest output folders."
+    )
+    parser.add_argument(
+        "inputs",
+        nargs="*",
+        help=(
+            "Optional explicit paths to result folders or portfolio_selections.csv files. "
+            "You can pass a variant dir, a 10d_horizon dir, a direction_score dir, or portfolio_selections.csv."
+        ),
+    )
+    parser.add_argument(
+        "--output",
+        default=str(OUTPUT_DIR / "dashboard.html"),
+        help="Output HTML path (default: backtest_results/analysis_output/dashboard.html)",
+    )
+    args = parser.parse_args()
+
     print("\n📊 Multi-Horizon Portfolio Dashboard Generator")
     print("=" * 60)
-    print(f"\n🔍 Scanning {BACKTEST_DIR}...")
-
-    discovered = discover_data()
+    if args.inputs:
+        print("\n🔍 Using explicit input paths...")
+        discovered = discover_data_from_paths(args.inputs)
+    else:
+        print(f"\n🔍 Scanning {BACKTEST_DIR}...")
+        discovered = discover_data()
     if not discovered:
         print("❌ No data found. Run factor_backtest_engine.py first.")
         sys.exit(1)
@@ -1808,8 +2183,15 @@ def main():
                 df, return_col = load_csv(csv_path, h)
                 print(f"   {len(df):,} positions · {df['rebalance_date'].nunique()} rebalance dates")
 
-                print(f"   Building equity curve...")
-                equity_df = build_equity_curve(df, return_col)
+                score_dir = csv_path.parent
+                pnl_df, review_log_df = load_engine_outputs(score_dir)
+
+                if pnl_df is not None:
+                    print(f"   Building equity curve from factor_pnl.csv...")
+                    equity_df = build_equity_curve_from_pnl(pnl_df)
+                else:
+                    print(f"   Building equity curve from portfolio_selections.csv...")
+                    equity_df = build_equity_curve(df, return_col)
                 total_ret = float(equity_df["cumulative_return_pct"].iloc[-1])
                 print(f"   Total return: {total_ret:+.2f}%")
 
@@ -1826,7 +2208,10 @@ def main():
                 rank_stability_df = compute_rank_stability(df)
 
                 print(f"   Computing turnover attribution...")
-                turnover_attr_df = compute_turnover_attribution(df)
+                if review_log_df is not None:
+                    turnover_attr_df = compute_turnover_attribution_from_review_log(review_log_df)
+                else:
+                    turnover_attr_df = compute_turnover_attribution(df)
 
                 print(f"   Building holdings data...")
                 holdings_data = build_holdings_data(df, ic_df, return_col)
@@ -1835,6 +2220,8 @@ def main():
                     "df":                df,
                     "return_col":        return_col,
                     "equity_df":         equity_df,
+                    "pnl_df":            pnl_df,
+                    "review_log_df":     review_log_df,
                     "ic_df":             ic_df,
                     "decile_df":         decile_df,
                     "ic_regime_stats":   ic_regime_stats,
@@ -1858,8 +2245,8 @@ def main():
     print(f"\n🎨 Generating dashboard HTML with {len(all_variants)} variants...")
     html = build_dashboard(all_variants)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUTPUT_DIR / "dashboard.html"
+    out = Path(args.output).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
     print(f"✅ Saved → {out}")
     print(f"   Size: {out.stat().st_size / 1024 / 1024:.1f} MB")

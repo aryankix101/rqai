@@ -4,9 +4,9 @@ LLM Composite Writer — Convert LLM Portfolio Decisions to Backtestable CSVs
 Reads the cached LLM portfolio JSON (from llm_portfolio_constructor.py) and
 produces composite-score-format CSVs that factor_backtest_engine.py can consume.
 
-The LLM's chosen weights are written as direction_score (positive for longs,
-negative for shorts, scaled to [-100, +100] range). magnitude_score is set
-to the absolute weight scaled to [0, 100].
+Selected LLM names keep their underlying deterministic direction/magnitude
+scores. Execution intent is carried in explicit metadata columns so the
+backtest engine does not need to infer long/short intent from score values.
 
 Usage:
     python llm_composite_writer.py --cache backtest_results/llm_portfolio_cache/llm_portfolio_2019-01-01_2019-12-31_10d.json
@@ -16,23 +16,47 @@ Usage:
 import argparse
 import json
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, Any
 
 import numpy as np
 import pandas as pd
 
+from data_source_config import DATASET_VERSION, DEFAULT_COMPOSITE_SCORES_DIR, DEFAULT_LLM_COMPOSITE_SCORES_DIR
+
 # =============================================================================
 # Config
 # =============================================================================
 
-COMPOSITE_SCORES_DIR = Path("backtest_results/composite_scores")
-DEFAULT_OUTPUT_DIR = Path("backtest_results/composite_scores_llm")
+COMPOSITE_SCORES_DIR = DEFAULT_COMPOSITE_SCORES_DIR
+DEFAULT_OUTPUT_DIR = DEFAULT_LLM_COMPOSITE_SCORES_DIR
+CACHE_SCHEMA_VERSION = 2
 
 
 # =============================================================================
 # Core Logic
 # =============================================================================
+
+
+def _promote_staged_directory(staging_dir: Path, output_dir: Path) -> None:
+    backup_dir = output_dir.with_name(f"{output_dir.name}.__previous__")
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+
+    if output_dir.exists():
+        output_dir.rename(backup_dir)
+
+    try:
+        staging_dir.rename(output_dir)
+    except Exception:
+        if backup_dir.exists() and not output_dir.exists():
+            backup_dir.rename(output_dir)
+        raise
+
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
 
 def write_llm_composites(
     cache_path: str,
@@ -40,17 +64,11 @@ def write_llm_composites(
 ):
     """Convert LLM portfolio cache to composite score CSVs.
 
-    For each ticker that appears in any LLM portfolio decision, creates a
-    composite-score CSV with:
-    - direction_score: LLM weight × 100 (positive for long, negative for short)
-    - magnitude_score: abs(weight) × 100
-    - All other columns (adj_close, forward returns) copied from the
-      deterministic composite CSV
-
-    Rows are only included for rebalance dates where the ticker was selected
-    by the LLM (or had valid data). Non-selected tickers on a given date
-    get direction_score=0, magnitude_score=0 so the backtest engine can
-    rank them below selected tickers.
+    For each ticker that appears in the deterministic composite directory,
+    creates an LLM-aware composite-score CSV with:
+    - selected rows keeping deterministic direction/magnitude scores
+    - unselected rows neutralized to zero execution scores
+    - explicit LLM metadata columns for selection, side, source, and weights
 
     Args:
         cache_path: Path to LLM portfolio cache JSON
@@ -70,9 +88,19 @@ def write_llm_composites(
     if not portfolios:
         print("❌ No portfolio decisions found in cache")
         sys.exit(1)
+    if metadata.get("schema_version") != CACHE_SCHEMA_VERSION:
+        print("❌ Cache uses a legacy schema. Rebuild the LLM cache before writing composites.")
+        sys.exit(1)
+    if metadata.get("llm_source_policy") != "strict_llm_only":
+        print("❌ Cache source policy is not strict LLM-only. Refusing to write legacy/fallback composites.")
+        sys.exit(1)
+    if metadata.get("source_dataset") != DATASET_VERSION:
+        print("❌ Cache dataset source is incompatible with the active Russell close-only pipeline.")
+        sys.exit(1)
 
     out_dir = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f"{out_dir.name}.tmp.", dir=str(out_dir.parent)))
 
     print(f"\n{'='*80}")
     print(f"LLM COMPOSITE WRITER")
@@ -87,21 +115,41 @@ def write_llm_composites(
     end_date = rebalance_dates[-1]
     print(f"   Date range: {start_date} to {end_date}")
 
-    # Build a map: {ticker: {date: {weight, side}}} from LLM decisions
-    llm_decisions = {}  # ticker -> {date_str: weight}  (positive=long, negative=short)
+    # Build a map: {ticker: {date: execution metadata}} from LLM decisions
+    llm_decisions: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     for date_str, portfolio in portfolios.items():
+        if portfolio.get("llm_source") != "llm":
+            print(f"❌ Non-LLM portfolio found in cache for {date_str}; rebuild cache.")
+            sys.exit(1)
+        execution_mode = portfolio.get("execution_mode", metadata.get("execution_mode", "equal_weight"))
         for entry in portfolio.get("long_basket", []):
             ticker = entry.get("ticker", "").upper()
-            weight = abs(float(entry.get("weight", 0)))
+            weight_raw = abs(float(entry.get("weight_raw", entry.get("weight", 0))))
+            weight_exec = abs(float(entry.get("weight_exec", entry.get("weight", 0))))
             if ticker:
-                llm_decisions.setdefault(ticker, {})[date_str] = weight
+                llm_decisions.setdefault(ticker, {})[date_str] = {
+                    "llm_selected": 1,
+                    "llm_side": "LONG",
+                    "llm_weight_raw": weight_raw,
+                    "llm_weight_exec": weight_exec,
+                    "llm_source": "llm",
+                    "llm_execution_mode": execution_mode,
+                }
 
         for entry in portfolio.get("short_basket", []):
             ticker = entry.get("ticker", "").upper()
-            weight = -abs(float(entry.get("weight", 0)))
+            weight_raw = abs(float(entry.get("weight_raw", entry.get("weight", 0))))
+            weight_exec = abs(float(entry.get("weight_exec", entry.get("weight", 0))))
             if ticker:
-                llm_decisions.setdefault(ticker, {})[date_str] = weight
+                llm_decisions.setdefault(ticker, {})[date_str] = {
+                    "llm_selected": 1,
+                    "llm_side": "SHORT",
+                    "llm_weight_raw": weight_raw,
+                    "llm_weight_exec": weight_exec,
+                    "llm_source": "llm",
+                    "llm_execution_mode": execution_mode,
+                }
 
     all_llm_tickers = set(llm_decisions.keys())
     print(f"   Unique tickers across all decisions: {len(all_llm_tickers)}")
@@ -110,6 +158,7 @@ def write_llm_composites(
     composite_files = sorted(COMPOSITE_SCORES_DIR.glob("*.csv"))
     written = 0
     skipped = 0
+    expected = 0
 
     for csv_file in composite_files:
         try:
@@ -132,26 +181,44 @@ def write_llm_composites(
             skipped += 1
             continue
 
-        # Assign LLM scores
+        expected += 1
+
+        # Preserve raw deterministic scores for analysis.
+        df["base_direction_score"] = df["direction_score"]
+        df["base_magnitude_score"] = df["magnitude_score"]
+
+        # Assign explicit LLM execution metadata.
         ticker_decisions = llm_decisions.get(ticker, {})
+        default_mode = metadata.get("execution_mode", "equal_weight")
+        date_keys = df["date"].dt.strftime("%Y-%m-%d")
+        df["llm_selected"] = date_keys.map(lambda d: int(ticker_decisions.get(d, {}).get("llm_selected", 0)))
+        df["llm_side"] = date_keys.map(lambda d: ticker_decisions.get(d, {}).get("llm_side", ""))
+        df["llm_weight_raw"] = date_keys.map(lambda d: float(ticker_decisions.get(d, {}).get("llm_weight_raw", 0.0)))
+        df["llm_weight_exec"] = date_keys.map(lambda d: float(ticker_decisions.get(d, {}).get("llm_weight_exec", 0.0)))
+        df["llm_source"] = date_keys.map(lambda d: ticker_decisions.get(d, {}).get("llm_source", ""))
+        df["llm_execution_mode"] = date_keys.map(lambda d: ticker_decisions.get(d, {}).get("llm_execution_mode", default_mode))
 
-        def get_llm_direction(row):
-            date_str = row["date"].strftime("%Y-%m-%d")
-            weight = ticker_decisions.get(date_str, 0.0)
-            return weight * 100.0  # Scale to [-100, +100] range
-
-        def get_llm_magnitude(row):
-            date_str = row["date"].strftime("%Y-%m-%d")
-            weight = ticker_decisions.get(date_str, 0.0)
-            return abs(weight) * 100.0  # Scale to [0, 100] range
-
-        df["direction_score"] = df.apply(get_llm_direction, axis=1)
-        df["magnitude_score"] = df.apply(get_llm_magnitude, axis=1)
+        selected_mask = df["llm_selected"] == 1
+        df.loc[~selected_mask, "direction_score"] = 0.0
+        df.loc[~selected_mask, "magnitude_score"] = 0.0
 
         # Write output CSV (same filename convention)
-        out_file = out_dir / csv_file.name
+        out_file = staging_dir / csv_file.name
         df.to_csv(out_file, index=False)
         written += 1
+
+    if written == 0:
+        raise RuntimeError(
+            "LLM composite writer produced zero CSVs. "
+            "Refusing to replace the previous output directory."
+        )
+    if expected != written:
+        raise RuntimeError(
+            f"LLM composite writer expected to write {expected} CSVs but only wrote {written}. "
+            "Refusing to publish a partial output directory."
+        )
+
+    _promote_staged_directory(staging_dir, out_dir)
 
     print(f"\n   ✓ Written: {written} CSVs")
     print(f"   ⏩ Skipped (no data in window): {skipped}")
@@ -161,9 +228,9 @@ def write_llm_composites(
     all_weights = []
     for date_str, portfolio in portfolios.items():
         for entry in portfolio.get("long_basket", []):
-            all_weights.append(float(entry.get("weight", 0)))
+            all_weights.append(float(entry.get("weight_exec", entry.get("weight", 0))))
         for entry in portfolio.get("short_basket", []):
-            all_weights.append(-float(entry.get("weight", 0)))
+            all_weights.append(-float(entry.get("weight_exec", entry.get("weight", 0))))
 
     if all_weights:
         all_weights = np.array(all_weights)
@@ -182,7 +249,9 @@ def write_llm_composites(
         "date_range": f"{start_date} to {end_date}",
         "num_rebalance_dates": len(rebalance_dates),
         "num_unique_tickers": len(all_llm_tickers),
+        "num_expected_csvs": expected,
         "num_csvs_written": written,
+        "source_dataset": DATASET_VERSION,
         "metadata": metadata,
     }
     summary_path = out_dir / "llm_composite_metadata.json"

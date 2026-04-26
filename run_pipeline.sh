@@ -2,6 +2,14 @@
 
 set -e 
 
+if [ -n "${PYTHON_BIN:-}" ]; then
+    PYTHON_CMD="${PYTHON_BIN}"
+elif [ -x "./.venv/bin/python" ]; then
+    PYTHON_CMD="./.venv/bin/python"
+else
+    PYTHON_CMD="python3"
+fi
+
 # Configuration
 DATA_START_DATE="1997-01-01"      
 BACKTEST_START_DATE="2000-01-01"  
@@ -22,6 +30,7 @@ echo "Tickers: ${#TICKERS[@]} stocks"
 echo "Data period: $DATA_START_DATE to $END_DATE (includes warmup)"
 echo "Backtest period: $BACKTEST_START_DATE to $END_DATE"
 echo "Forward Horizons: ${FORWARD_HORIZONS[@]} days"
+echo "Python: $PYTHON_CMD"
 echo ""
 
 # ============================================================================
@@ -33,7 +42,7 @@ if [ "$RUN_STAGE1" = true ]; then
 
     for ticker in "${TICKERS[@]}"; do
         echo "  Processing: $ticker"
-        python3 signal_data_dump.py "$ticker" "$DATA_START_DATE" "$END_DATE" || {
+        "$PYTHON_CMD" signal_data_dump.py "$ticker" "$DATA_START_DATE" "$END_DATE" || {
             echo "    Warning: Failed to generate signals for $ticker"
         }
     done
@@ -55,7 +64,7 @@ if [ "$RUN_STAGE2" = true ]; then
         
         if [ -f "$signal_file" ]; then
             echo "  Processing: $ticker"
-            python3 composite_score_calculator.py "$signal_file" || {
+            "$PYTHON_CMD" composite_score_calculator.py "$signal_file" || {
                 echo "    Warning: Failed to calculate scores for $ticker"
             }
         else
@@ -80,7 +89,7 @@ echo ""
 
 for horizon in "${FORWARD_HORIZONS[@]}"; do
     echo "Running backtest for ${horizon}-day forward horizon..."
-    python3 factor_backtest_engine.py "$horizon" "$BACKTEST_START_DATE" "$END_DATE" ${TICKERS[@]} || {
+    "$PYTHON_CMD" factor_backtest_engine.py "$horizon" "$BACKTEST_START_DATE" "$END_DATE" ${TICKERS[@]} || {
         echo "  Warning: Backtest failed for ${horizon}-day horizon"
     }
     echo ""

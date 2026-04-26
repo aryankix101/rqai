@@ -7,14 +7,37 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
 from pathlib import Path
+from dataclasses import dataclass
 from scipy.stats import spearmanr
 import scipy.stats
 import warnings
 import sys
+import os
 
+from data_source_config import (
+    DEFAULT_COMPOSITE_SCORES_DIR,
+    RUSSELL_MEMBERSHIP_PATH,
+    SPY_SIGNAL_DATA_PATH,
+)
 from hit_rate_validator import CANONICAL_EXECUTION_MODEL, get_trade_window
-from portfolio_constraints import MIN_TRADE_PRICE, has_min_trade_price
+from portfolio_constraints import (
+    MIN_TRADE_PRICE,
+    filter_symbol_hygiene_frame,
+    has_min_trade_price,
+)
+from portfolio_policies import (
+    DEFAULT_REGIME_REVIEW_INTERVALS,
+    HysteresisPolicy,
+    PortfolioConstructionConfig,
+    PositionState,
+    ReviewDecision,
+    ReviewPolicy,
+    build_target_weights,
+    compute_trade_decision,
+)
+from russell_data_loader import load_russell_ohlcv_histories
 
 warnings.filterwarnings("ignore")
 sns.set_style("darkgrid")
@@ -22,7 +45,7 @@ sns.set_style("darkgrid")
 # ----------------------------
 # Config
 # ----------------------------
-COMPOSITE_SCORES_DIR = Path("backtest_results/composite_scores")
+COMPOSITE_SCORES_DIR = DEFAULT_COMPOSITE_SCORES_DIR
 OUTPUT_DIR_BASE = Path("backtest_results/factor_backtest")
 
 # Factor construction
@@ -33,6 +56,18 @@ BOTTOM_N = 30
 COST_RATE = 0.0015  # 15 bps one-way cost (commission + spread + slippage per trade)
                      # Turnover = sum(|w_new - w_old|) = 2x full notional traded (long-short)
 SCORE_TYPES = ["direction_score", "magnitude_score"]
+LLM_REQUIRED_COLUMNS = {
+    "llm_selected",
+    "llm_side",
+    "llm_weight_raw",
+    "llm_weight_exec",
+    "llm_source",
+    "llm_execution_mode",
+}
+_RUSSELL_DATASET_HINTS = ("russell", "ohlcv")
+_PRICE_HISTORY_CACHE = {}
+_MEMBERSHIP_LOOKUP_CACHE = {}
+_USE_RUSSELL_DENSE_PRICE_ENRICHMENT = os.environ.get("RUSSELL_DENSE_PRICES", "0").lower() in {"1", "true", "yes"}
 
 
 def _ic_target(score_type: str) -> str:
@@ -49,6 +84,106 @@ def _ic_target(score_type: str) -> str:
     if score_type == "magnitude_score":
         return f"fwd_abs_{FORWARD_DAYS}d_ret"
     return f"fwd_{FORWARD_DAYS}d_ret"
+
+
+@dataclass(frozen=True)
+class RussellMembershipLookup:
+    dates_ns: np.ndarray
+    universes: tuple[frozenset[str], ...]
+    path: str
+
+
+def _membership_flag_is_active(value) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value) != 0.0
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def _normalize_membership_symbol(symbol) -> str:
+    if pd.isna(symbol):
+        return ""
+    return str(symbol).strip().upper().split("-", 1)[0]
+
+
+def load_russell_membership_lookup(path=RUSSELL_MEMBERSHIP_PATH) -> RussellMembershipLookup:
+    membership_path = Path(path).expanduser()
+    cache_key = str(membership_path.resolve()) if membership_path.exists() else str(membership_path)
+    cached = _MEMBERSHIP_LOOKUP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if not membership_path.exists():
+        raise FileNotFoundError(f"Russell membership file not found: {membership_path}")
+
+    if membership_path.suffix.lower() == ".parquet":
+        membership_df = pd.read_parquet(membership_path)
+    else:
+        membership_df = pd.read_csv(membership_path, parse_dates=["date"])
+
+    required_cols = {"date", "symbol"}
+    missing_cols = required_cols - set(membership_df.columns)
+    if missing_cols:
+        raise ValueError(
+            f"Russell membership file missing required columns: {sorted(missing_cols)}"
+        )
+
+    membership_df = membership_df.copy()
+    membership_df["date"] = pd.to_datetime(membership_df["date"], errors="coerce")
+    membership_df["symbol"] = membership_df["symbol"].map(_normalize_membership_symbol)
+    membership_df = membership_df.dropna(subset=["date"])
+    membership_df = membership_df[membership_df["symbol"] != ""]
+
+    if "in_r1000" in membership_df.columns:
+        membership_df = membership_df[membership_df["in_r1000"].map(_membership_flag_is_active)]
+
+    if membership_df.empty:
+        raise ValueError(f"Russell membership file has no active rows: {membership_path}")
+
+    membership_df = (
+        membership_df[["date", "symbol"]]
+        .drop_duplicates()
+        .sort_values(["date", "symbol"])
+        .reset_index(drop=True)
+    )
+
+    grouped = membership_df.groupby("date", sort=True)["symbol"].agg(
+        lambda values: frozenset(str(value) for value in values if value)
+    )
+    dates_ns = grouped.index.to_numpy(dtype="datetime64[ns]").view("i8")
+    universes = tuple(grouped.tolist())
+
+    lookup = RussellMembershipLookup(
+        dates_ns=dates_ns,
+        universes=universes,
+        path=str(membership_path),
+    )
+    _MEMBERSHIP_LOOKUP_CACHE[cache_key] = lookup
+    return lookup
+
+
+def _is_membership_active(
+    membership_lookup: RussellMembershipLookup | None,
+    ticker,
+    as_of_date,
+) -> bool:
+    if membership_lookup is None:
+        return True
+    if ticker is None or as_of_date is None or membership_lookup.dates_ns.size == 0:
+        return False
+
+    target_ns = pd.Timestamp(as_of_date).value
+    idx = np.searchsorted(membership_lookup.dates_ns, target_ns, side="right") - 1
+    if idx < 0:
+        return False
+
+    normalized_ticker = _normalize_membership_symbol(ticker)
+    if not normalized_ticker:
+        return False
+    return normalized_ticker in membership_lookup.universes[idx]
 
 # ----------------------------
 # Data Loading
@@ -78,27 +213,41 @@ def load_all_composites(ticker_filter=None):
     
     
     print(f"📂 Loading {len(csv_files)} stocks...\n")
+    filtered_rows = 0
+    touched_tickers = 0
     
     for csv_file in csv_files:
         try:
             ticker = csv_file.stem.split("_")[2]
             df = pd.read_csv(csv_file, parse_dates=["date"])
             df = df.sort_values("date").reset_index(drop=True)
-            missing_price_cols = {"adj_open", "adj_close"} - set(df.columns)
-            if missing_price_cols:
+            if "adj_close" not in df.columns:
                 raise ValueError(
-                    f"missing required columns {sorted(missing_price_cols)}; "
+                    "missing required column ['adj_close']; "
                     "re-run composite_score_calculator.py with the updated signal dump"
                 )
+            cleaned = filter_symbol_hygiene_frame(df)
+            removed = len(df) - len(cleaned)
+            if removed > 0:
+                filtered_rows += removed
+                touched_tickers += 1
+            df = cleaned
+            if df.empty:
+                continue
             results[ticker] = df
             print(f"   ✓ {ticker:6s} - {len(df)} records")
         except Exception as e:
             print(f"   ❌ {csv_file.name}: {e}")
+    if filtered_rows > 0:
+        print(
+            f"\n   ✓ Symbol hygiene filter removed {filtered_rows} ambiguous/recycled rows "
+            f"across {touched_tickers} tickers"
+        )
     
     return results
 
 
-def load_spy_data(spy_path="backtest_results/signal_data_dump/signal_data_dump_SPY_1993-01-01_2025-12-31.csv"):
+def load_spy_data(spy_path=str(SPY_SIGNAL_DATA_PATH)):
     """Load SPY signal data for regime calculation"""
     if not Path(spy_path).exists():
         print(f"⚠️  SPY data not found at {spy_path}")
@@ -143,18 +292,33 @@ def _build_execution_schedule(calendar_dates, signal_dates):
     return execution_schedule
 
 
-def _cross_sectional_snapshot(all_data, signal_date, score_type="direction_score"):
+def _cross_sectional_snapshot(
+    all_data,
+    signal_date,
+    score_type="direction_score",
+    require_exact_dates: bool | None = None,
+    selected_only: bool = False,
+    membership_lookup: RussellMembershipLookup | None = None,
+):
     """Scores and realized forward returns from a single signal date."""
     ret_col = _ic_target(score_type)
     rows = []
+    if require_exact_dates is None:
+        require_exact_dates = _looks_like_russell_dataset(all_data) and _is_close_only_dataset(all_data)
 
     for ticker, df in all_data.items():
-        row = df[df["date"] == signal_date]
-        if row.empty or ret_col not in row.columns:
+        if not _is_membership_active(membership_lookup, ticker, signal_date):
+            continue
+        row = _row_on_exact_date(df, signal_date) if require_exact_dates else _row_on_or_before(df, signal_date)
+        if row is None or ret_col not in row.index:
             continue
 
-        row = row.iloc[0]
-        score = row.get(score_type, np.nan)
+        if _has_explicit_llm_columns(df):
+            if selected_only and int(row.get("llm_selected", 0)) != 1:
+                continue
+            score = row.get(f"base_{score_type}", row.get(score_type, np.nan))
+        else:
+            score = row.get(score_type, np.nan)
         ret_pct = row.get(ret_col, np.nan)
         if pd.notna(score) and pd.notna(ret_pct):
             rows.append({
@@ -164,6 +328,218 @@ def _cross_sectional_snapshot(all_data, signal_date, score_type="direction_score
             })
 
     return pd.DataFrame(rows)
+
+
+def _has_explicit_llm_columns(df):
+    return LLM_REQUIRED_COLUMNS.issubset(set(df.columns))
+
+
+def _is_explicit_llm_backtest(all_data):
+    return any(_has_explicit_llm_columns(df) for df in all_data.values())
+
+
+def _available_explicit_llm_signal_dates(all_data):
+    """Return the cached LLM decision dates present in the score files."""
+    available_dates = set()
+    for df in all_data.values():
+        if not _has_explicit_llm_columns(df):
+            continue
+        selected_rows = df[df["llm_selected"] == 1]
+        if selected_rows.empty:
+            continue
+        available_dates.update(pd.to_datetime(selected_rows["date"]).tolist())
+    return sorted(pd.Timestamp(date) for date in available_dates)
+
+
+def _resolve_explicit_llm_signal_date(signal_date, available_signal_dates):
+    """Use the latest cached LLM decision date on or before the requested signal date."""
+    if signal_date is None or not available_signal_dates:
+        return None
+
+    signal_ts = pd.Timestamp(signal_date)
+    resolved = None
+    for candidate in available_signal_dates:
+        if candidate > signal_ts:
+            break
+        resolved = candidate
+    return resolved
+
+
+def _build_explicit_llm_weights(
+    all_data,
+    signal_date,
+    trade_date,
+    prepared_ticker_data,
+    available_signal_dates=None,
+    membership_lookup: RussellMembershipLookup | None = None,
+):
+    """Build portfolio weights from explicit LLM selection metadata."""
+    resolved_signal_date = _resolve_explicit_llm_signal_date(signal_date, available_signal_dates or [])
+    if resolved_signal_date is None:
+        resolved_signal_date = pd.Timestamp(signal_date) if signal_date is not None else None
+    if resolved_signal_date is None:
+        return {}
+
+    longs = []
+    shorts = []
+    execution_mode = None
+
+    for ticker, df in all_data.items():
+        if not _has_explicit_llm_columns(df):
+            continue
+        if not _is_membership_active(membership_lookup, ticker, resolved_signal_date):
+            continue
+
+        row = df[df["date"] == resolved_signal_date]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+
+        if int(row.get("llm_selected", 0)) != 1:
+            continue
+
+        prepared = prepared_ticker_data.get(ticker)
+        price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
+        if not has_min_trade_price(price):
+            continue
+
+        side = str(row.get("llm_side", "")).upper()
+        weight_exec = abs(float(row.get("llm_weight_exec", 0.0)))
+        execution_mode = execution_mode or str(row.get("llm_execution_mode", "equal_weight"))
+
+        if side == "LONG":
+            longs.append((ticker, weight_exec))
+        elif side == "SHORT":
+            shorts.append((ticker, weight_exec))
+
+    if not longs or not shorts:
+        return {}
+
+    new_weights = {}
+    if execution_mode == "llm_weighted":
+        long_total = sum(weight for _, weight in longs)
+        short_total = sum(weight for _, weight in shorts)
+        if long_total <= 0 or short_total <= 0:
+            return {}
+        for ticker, weight in longs:
+            new_weights[ticker] = weight / long_total
+        for ticker, weight in shorts:
+            new_weights[ticker] = -(weight / short_total)
+    else:
+        for ticker, _ in longs:
+            new_weights[ticker] = 1.0 / len(longs)
+        for ticker, _ in shorts:
+            new_weights[ticker] = -(1.0 / len(shorts))
+
+    return new_weights
+
+
+def _explicit_llm_snapshot(
+    all_data,
+    score_type,
+    signal_date,
+    trade_date,
+    prepared_ticker_data,
+    available_signal_dates=None,
+    membership_lookup: RussellMembershipLookup | None = None,
+):
+    """Collect explicit LLM selections with prices/scores for logging and execution."""
+    resolved_signal_date = _resolve_explicit_llm_signal_date(signal_date, available_signal_dates or [])
+    if resolved_signal_date is None:
+        resolved_signal_date = pd.Timestamp(signal_date) if signal_date is not None else None
+    if resolved_signal_date is None:
+        return {
+            "resolved_signal_date": None,
+            "date_scores": {},
+            "long_candidates": [],
+            "short_candidates": [],
+            "long_rank_map": {},
+            "short_rank_map": {},
+            "target_weights": {},
+        }
+
+    raw_longs = []
+    raw_shorts = []
+    execution_mode = None
+
+    for ticker, df in all_data.items():
+        if not _has_explicit_llm_columns(df):
+            continue
+        if not _is_membership_active(membership_lookup, ticker, resolved_signal_date):
+            continue
+
+        row = df[df["date"] == resolved_signal_date]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+
+        if int(row.get("llm_selected", 0)) != 1:
+            continue
+
+        prepared = prepared_ticker_data.get(ticker)
+        price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
+        if not has_min_trade_price(price):
+            continue
+
+        side = str(row.get("llm_side", "")).upper()
+        weight_exec = abs(float(row.get("llm_weight_exec", 0.0)))
+        score = row.get(f"base_{score_type}", row.get(score_type, np.nan))
+        execution_mode = execution_mode or str(row.get("llm_execution_mode", "equal_weight"))
+
+        payload = {
+            "ticker": ticker,
+            "score": float(score) if pd.notna(score) else np.nan,
+            "price": float(price),
+            "weight_exec": weight_exec,
+        }
+        if side == "LONG":
+            raw_longs.append(payload)
+        elif side == "SHORT":
+            raw_shorts.append(payload)
+
+    def _sort_key(item, reverse=False):
+        score = item["score"]
+        if pd.isna(score):
+            return (-np.inf if reverse else np.inf, item["ticker"])
+        return (score, item["ticker"])
+
+    sorted_longs = sorted(raw_longs, key=lambda item: _sort_key(item, reverse=True), reverse=True)
+    sorted_shorts = sorted(raw_shorts, key=lambda item: _sort_key(item, reverse=False))
+
+    date_scores = {
+        item["ticker"]: {"score": item["score"], "price": item["price"]}
+        for item in sorted_longs + sorted_shorts
+    }
+    long_candidates = [item["ticker"] for item in sorted_longs]
+    short_candidates = [item["ticker"] for item in sorted_shorts]
+    long_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(long_candidates)}
+    short_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(short_candidates)}
+
+    target_weights = {}
+    if long_candidates and short_candidates:
+        if execution_mode == "llm_weighted":
+            long_total = sum(item["weight_exec"] for item in sorted_longs)
+            short_total = sum(item["weight_exec"] for item in sorted_shorts)
+            if long_total > 0 and short_total > 0:
+                for item in sorted_longs:
+                    target_weights[item["ticker"]] = item["weight_exec"] / long_total
+                for item in sorted_shorts:
+                    target_weights[item["ticker"]] = -(item["weight_exec"] / short_total)
+        else:
+            for item in sorted_longs:
+                target_weights[item["ticker"]] = 1.0 / len(sorted_longs)
+            for item in sorted_shorts:
+                target_weights[item["ticker"]] = -(1.0 / len(sorted_shorts))
+
+    return {
+        "resolved_signal_date": resolved_signal_date,
+        "date_scores": date_scores,
+        "long_candidates": long_candidates,
+        "short_candidates": short_candidates,
+        "long_rank_map": long_rank_map,
+        "short_rank_map": short_rank_map,
+        "target_weights": target_weights,
+    }
 
 
 def identify_regimes(spy_df):
@@ -266,174 +642,1664 @@ def identify_regimes(spy_df):
 # Portfolio Construction
 # ----------------------------
 
-def build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type="direction_score", regime_map=None):
-    """Build daily returns from top n / bottom n equal weight market-neutral portfolio
-    
-    Canonical execution mechanics:
-    - Signal is observed at the rebalance date close
-    - Portfolio is entered/exited at the NEXT trading day's open
-    - PnL accrues open-to-open
-    - Transaction cost = COST_RATE (one-way) * turnover on each rebalance open
-    - Only stocks with execution prices above the minimum trade price are eligible
+def _execution_price_column(df: pd.DataFrame) -> str:
+    if "adj_open" in df.columns:
+        return "adj_open"
+    return "adj_close"
+
+
+@dataclass
+class PreparedTickerData:
+    price_dates_ns: np.ndarray
+    price_values: np.ndarray
+    score_dates_ns: np.ndarray
+    score_values: np.ndarray
+    direction_dates_ns: np.ndarray
+    direction_values: np.ndarray
+    magnitude_dates_ns: np.ndarray
+    magnitude_values: np.ndarray
+
+
+@dataclass(frozen=True)
+class CandidatePoolConfig:
+    mode: str = "raw"
+    direction_threshold: float = 5.0
+    top_n_magnitude_per_side: int = 60
+
+    def is_default(self) -> bool:
+        return self.mode == "raw"
+
+    def describe(self) -> str:
+        if self.mode == "raw":
+            return "raw score ranking across the full tradable universe"
+        return (
+            "LLM-mirror pool: "
+            f"dir>|{self.direction_threshold:g}| split, "
+            f"top {self.top_n_magnitude_per_side} by magnitude per side, "
+            "then rank within side by the selected score"
+        )
+
+    def label_suffix(self) -> str:
+        if self.mode == "raw":
+            return "pool_raw"
+        threshold = str(self.direction_threshold).replace(".", "p")
+        return f"pool_{self.mode}_m{self.top_n_magnitude_per_side}_d{threshold}"
+
+
+def _resolve_price_column(price_df: pd.DataFrame, preferred_price_column: str) -> str:
+    if preferred_price_column in price_df.columns:
+        return preferred_price_column
+    if "adj_close" in price_df.columns:
+        return "adj_close"
+    if "adj_open" in price_df.columns:
+        return "adj_open"
+    raise ValueError(f"No compatible price column found in {list(price_df.columns)}")
+
+
+def _prepare_ticker_data(
+    df: pd.DataFrame,
+    score_type: str,
+    price_df: pd.DataFrame | None = None,
+    preferred_price_column: str | None = None,
+) -> PreparedTickerData:
+    """Store compact per-ticker arrays for score lookups and ffilled price lookups."""
+    clean_df = filter_symbol_hygiene_frame(df)
+
+    def _numeric_column_or_nan(column_name: str) -> pd.Series:
+        if column_name in clean_df.columns:
+            return pd.to_numeric(clean_df[column_name], errors="coerce")
+        return pd.Series(np.nan, index=clean_df.index, dtype=float)
+
+    price_source = price_df if price_df is not None else clean_df
+    if price_df is not None and "date" in price_df.columns and "date" in clean_df.columns:
+        allowed_dates = pd.to_datetime(clean_df["date"], errors="coerce").dropna().unique()
+        price_source = price_df[pd.to_datetime(price_df["date"], errors="coerce").isin(allowed_dates)].copy()
+    price_col = _resolve_price_column(price_source, preferred_price_column or _execution_price_column(clean_df))
+    price_table = pd.DataFrame(
+        {
+            "date": pd.to_datetime(price_source["date"], errors="coerce"),
+            "price": pd.to_numeric(price_source[price_col], errors="coerce"),
+        }
+    )
+    price_table = (
+        price_table.dropna(subset=["date", "price"])
+        .sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+        .reset_index(drop=True)
+    )
+
+    score_table = pd.DataFrame(
+        {
+            "date": pd.to_datetime(clean_df["date"], errors="coerce"),
+            "score": pd.to_numeric(clean_df[score_type], errors="coerce"),
+        }
+    )
+    score_table = (
+        score_table.dropna(subset=["date", "score"])
+        .sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+        .reset_index(drop=True)
+    )
+
+    direction_table = pd.DataFrame(
+        {
+            "date": pd.to_datetime(clean_df["date"], errors="coerce"),
+            "value": _numeric_column_or_nan("direction_score"),
+        }
+    )
+    direction_table = (
+        direction_table.dropna(subset=["date", "value"])
+        .sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+        .reset_index(drop=True)
+    )
+
+    magnitude_table = pd.DataFrame(
+        {
+            "date": pd.to_datetime(clean_df["date"], errors="coerce"),
+            "value": _numeric_column_or_nan("magnitude_score"),
+        }
+    )
+    magnitude_table = (
+        magnitude_table.dropna(subset=["date", "value"])
+        .sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+        .reset_index(drop=True)
+    )
+
+    # Force nanosecond resolution across pandas versions before converting to int64.
+    # Pandas 2 can preserve lower-resolution datetime64 units (for example us/s),
+    # while Timestamp.value is always nanoseconds. Mixing those units breaks searchsorted.
+    price_dates_ns = price_table["date"].to_numpy(dtype="datetime64[ns]").view("i8")
+    price_values = price_table["price"].to_numpy(dtype=np.float32, copy=True)
+    score_dates_ns = score_table["date"].to_numpy(dtype="datetime64[ns]").view("i8")
+    score_values = score_table["score"].to_numpy(dtype=np.float32, copy=True)
+    direction_dates_ns = direction_table["date"].to_numpy(dtype="datetime64[ns]").view("i8")
+    direction_values = direction_table["value"].to_numpy(dtype=np.float32, copy=True)
+    magnitude_dates_ns = magnitude_table["date"].to_numpy(dtype="datetime64[ns]").view("i8")
+    magnitude_values = magnitude_table["value"].to_numpy(dtype=np.float32, copy=True)
+
+    return PreparedTickerData(
+        price_dates_ns=price_dates_ns,
+        price_values=price_values,
+        score_dates_ns=score_dates_ns,
+        score_values=score_values,
+        direction_dates_ns=direction_dates_ns,
+        direction_values=direction_values,
+        magnitude_dates_ns=magnitude_dates_ns,
+        magnitude_values=magnitude_values,
+    )
+
+
+def _lookup_ffill_price(prepared: PreparedTickerData, trade_date) -> float:
+    if prepared.price_dates_ns.size == 0 or trade_date is None:
+        return np.nan
+    target_ns = pd.Timestamp(trade_date).value
+    idx = np.searchsorted(prepared.price_dates_ns, target_ns, side="right") - 1
+    if idx < 0:
+        return np.nan
+    return float(prepared.price_values[idx])
+
+
+def _lookup_exact_price(prepared: PreparedTickerData, trade_date) -> float:
+    if prepared.price_dates_ns.size == 0 or trade_date is None:
+        return np.nan
+    target_ns = pd.Timestamp(trade_date).value
+    idx = np.searchsorted(prepared.price_dates_ns, target_ns, side="left")
+    if idx >= prepared.price_dates_ns.size or prepared.price_dates_ns[idx] != target_ns:
+        return np.nan
+    return float(prepared.price_values[idx])
+
+
+def _lookup_value_on_or_before(dates_ns: np.ndarray, values: np.ndarray, signal_date) -> float:
+    if dates_ns.size == 0 or signal_date is None:
+        return np.nan
+    target_ns = pd.Timestamp(signal_date).value
+    idx = np.searchsorted(dates_ns, target_ns, side="right") - 1
+    if idx < 0:
+        return np.nan
+    return float(values[idx])
+
+
+def _lookup_exact_value(dates_ns: np.ndarray, values: np.ndarray, signal_date) -> float:
+    if dates_ns.size == 0 or signal_date is None:
+        return np.nan
+    target_ns = pd.Timestamp(signal_date).value
+    idx = np.searchsorted(dates_ns, target_ns, side="left")
+    if idx >= dates_ns.size or dates_ns[idx] != target_ns:
+        return np.nan
+    return float(values[idx])
+
+
+def _lookup_score_on_or_before(prepared: PreparedTickerData, signal_date) -> float:
+    return _lookup_value_on_or_before(prepared.score_dates_ns, prepared.score_values, signal_date)
+
+
+def _lookup_exact_score(prepared: PreparedTickerData, signal_date) -> float:
+    return _lookup_exact_value(prepared.score_dates_ns, prepared.score_values, signal_date)
+
+
+def _is_close_only_dataset(all_data) -> bool:
+    if not all_data:
+        return False
+    return all("adj_open" not in df.columns for df in all_data.values())
+
+
+def _build_trade_signal_map(calendar_dates, close_only: bool = False):
+    """Map execution dates to the signal date used for portfolio construction."""
+    calendar = [pd.Timestamp(d) for d in sorted(pd.to_datetime(calendar_dates).unique())]
+    if close_only:
+        return {date: date for date in calendar}
+    return {calendar[idx]: calendar[idx - 1] for idx in range(1, len(calendar))}
+
+
+def _filter_trading_dates(calendar_dates, start_date=None, end_date=None):
+    filtered = []
+    for date in sorted(pd.to_datetime(calendar_dates).unique()):
+        ts = pd.Timestamp(date)
+        if start_date is not None and ts < start_date:
+            continue
+        if end_date is not None and ts > end_date:
+            continue
+        filtered.append(ts)
+    return filtered
+
+
+def _row_on_or_before(df: pd.DataFrame, target_date):
+    if df is None or df.empty or target_date is None or "date" not in df.columns:
+        return None
+
+    dates = pd.to_datetime(df["date"], errors="coerce").to_numpy(dtype="datetime64[ns]")
+    if dates.size == 0:
+        return None
+
+    idx = np.searchsorted(dates, np.datetime64(pd.Timestamp(target_date)), side="right") - 1
+    if idx < 0:
+        return None
+    return df.iloc[int(idx)]
+
+
+def _row_on_exact_date(df: pd.DataFrame, target_date):
+    if df is None or df.empty or target_date is None or "date" not in df.columns:
+        return None
+
+    dates = pd.to_datetime(df["date"], errors="coerce").to_numpy(dtype="datetime64[ns]")
+    if dates.size == 0:
+        return None
+
+    target = np.datetime64(pd.Timestamp(target_date))
+    idx = np.searchsorted(dates, target, side="left")
+    if idx >= len(df) or dates[idx] != target:
+        return None
+    return df.iloc[int(idx)]
+
+
+def _looks_like_russell_dataset(all_data) -> bool:
+    dataset_tokens = set()
+    for df in all_data.values():
+        for col in ("dataset_label", "dataset_version"):
+            if col not in df.columns:
+                continue
+            values = df[col].dropna().astype(str).str.lower().unique().tolist()
+            dataset_tokens.update(values[:5])
+        if dataset_tokens:
+            break
+
+    if not dataset_tokens:
+        return False
+
+    dataset_text = " ".join(sorted(dataset_tokens))
+    return all(token in dataset_text for token in _RUSSELL_DATASET_HINTS)
+
+
+def _load_dense_price_histories(tickers) -> dict[str, pd.DataFrame]:
+    cache_key = tuple(sorted(str(ticker).upper() for ticker in tickers))
+    if not cache_key:
+        return {}
+    if cache_key in _PRICE_HISTORY_CACHE:
+        return _PRICE_HISTORY_CACHE[cache_key]
+
+    histories = load_russell_ohlcv_histories(tickers=cache_key)
+    cleaned = {}
+    for ticker, df in histories.items():
+        if df.empty or "date" not in df.columns:
+            continue
+        cols = [col for col in ("date", "adj_open", "adj_close") if col in df.columns]
+        if len(cols) < 2:
+            continue
+        cleaned[str(ticker).upper()] = (
+            df[cols]
+            .copy()
+            .sort_values("date")
+            .drop_duplicates(subset=["date"], keep="last")
+            .reset_index(drop=True)
+        )
+
+    _PRICE_HISTORY_CACHE[cache_key] = cleaned
+    return cleaned
+
+
+def _candidate_snapshot(
+    score_type,
+    prepared_ticker_data,
+    signal_date,
+    trade_date,
+    require_exact_dates=False,
+    candidate_pool_config: CandidatePoolConfig | None = None,
+    membership_lookup: RussellMembershipLookup | None = None,
+):
+    candidate_pool_config = candidate_pool_config or CandidatePoolConfig()
+    date_scores = {}
+    for ticker, prepared in prepared_ticker_data.items():
+        if not _is_membership_active(membership_lookup, ticker, signal_date):
+            continue
+        if require_exact_dates:
+            score = _lookup_exact_score(prepared, signal_date)
+            price = _lookup_exact_price(prepared, trade_date)
+            direction_score = _lookup_exact_value(
+                prepared.direction_dates_ns,
+                prepared.direction_values,
+                signal_date,
+            )
+            magnitude_score = _lookup_exact_value(
+                prepared.magnitude_dates_ns,
+                prepared.magnitude_values,
+                signal_date,
+            )
+        else:
+            score = _lookup_score_on_or_before(prepared, signal_date)
+            price = _lookup_ffill_price(prepared, trade_date)
+            direction_score = _lookup_value_on_or_before(
+                prepared.direction_dates_ns,
+                prepared.direction_values,
+                signal_date,
+            )
+            magnitude_score = _lookup_value_on_or_before(
+                prepared.magnitude_dates_ns,
+                prepared.magnitude_values,
+                signal_date,
+            )
+        if pd.notna(score) and has_min_trade_price(price):
+            date_scores[ticker] = {
+                "score": float(score),
+                "price": float(price),
+                "direction_score": float(direction_score) if pd.notna(direction_score) else np.nan,
+                "magnitude_score": float(magnitude_score) if pd.notna(magnitude_score) else np.nan,
+            }
+
+    if not date_scores:
+        return {
+            "date_scores": {},
+            "long_candidates": [],
+            "short_candidates": [],
+            "long_rank_map": {},
+            "short_rank_map": {},
+        }
+
+    if candidate_pool_config.mode == "llm_mirror":
+        threshold = float(candidate_pool_config.direction_threshold)
+        top_n_magnitude = int(candidate_pool_config.top_n_magnitude_per_side)
+
+        long_pool = [
+            ticker
+            for ticker, payload in date_scores.items()
+            if pd.notna(payload["direction_score"])
+            and payload["direction_score"] > threshold
+            and pd.notna(payload["magnitude_score"])
+        ]
+        short_pool = [
+            ticker
+            for ticker, payload in date_scores.items()
+            if pd.notna(payload["direction_score"])
+            and payload["direction_score"] < -threshold
+            and pd.notna(payload["magnitude_score"])
+        ]
+
+        long_pool = sorted(
+            long_pool,
+            key=lambda ticker: (date_scores[ticker]["magnitude_score"], ticker),
+            reverse=True,
+        )[:top_n_magnitude]
+        short_pool = sorted(
+            short_pool,
+            key=lambda ticker: (date_scores[ticker]["magnitude_score"], ticker),
+            reverse=True,
+        )[:top_n_magnitude]
+
+        filtered_tickers = set(long_pool) | set(short_pool)
+        date_scores = {ticker: date_scores[ticker] for ticker in filtered_tickers}
+        long_candidates = sorted(
+            long_pool,
+            key=lambda ticker: (date_scores[ticker]["score"], ticker),
+            reverse=True,
+        )
+        short_candidates = sorted(
+            short_pool,
+            key=lambda ticker: (date_scores[ticker]["score"], ticker),
+        )
+    else:
+        long_candidates = sorted(
+            date_scores.keys(),
+            key=lambda ticker: (date_scores[ticker]["score"], ticker),
+            reverse=True,
+        )
+        short_candidates = sorted(
+            date_scores.keys(),
+            key=lambda ticker: (date_scores[ticker]["score"], ticker),
+        )
+
+    long_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(long_candidates)}
+    short_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(short_candidates)}
+    return {
+        "date_scores": date_scores,
+        "long_candidates": long_candidates,
+        "short_candidates": short_candidates,
+        "long_rank_map": long_rank_map,
+        "short_rank_map": short_rank_map,
+    }
+
+
+def _review_signal_dates(review_log_df):
+    if review_log_df is None or review_log_df.empty:
+        return []
+    return sorted(
+        pd.to_datetime(review_log_df["signal_date"], errors="coerce").dropna().unique()
+    )
+
+
+def _summarize_policy_label(config: PortfolioConstructionConfig) -> str:
+    return (
+        f"review={config.review_policy.mode}"
+        f", static_days={config.review_policy.static_review_days}"
+        f", hysteresis={config.hysteresis_policy.mode}"
+    )
+
+
+def _close_position_segment(
+    holdings_records,
+    position: PositionState,
+    exit_date,
+    exit_signal_date,
+    exit_price,
+    exit_reason,
+    calendar_index,
+):
+    if position.entry_price is None or exit_price is None:
+        realized_return_pct = np.nan
+    else:
+        realized_return_pct = (float(exit_price) / float(position.entry_price) - 1.0) * 100.0
+        if position.side == "SHORT":
+            realized_return_pct = -realized_return_pct
+
+    entry_idx = calendar_index.get(pd.Timestamp(position.entry_date))
+    exit_idx = calendar_index.get(pd.Timestamp(exit_date))
+    holding_days = exit_idx - entry_idx if entry_idx is not None and exit_idx is not None else np.nan
+
+    holdings_records.append({
+        "ticker": position.ticker,
+        "position_type": position.side,
+        "entry_date": pd.Timestamp(position.entry_date),
+        "exit_date": pd.Timestamp(exit_date),
+        "entry_signal_date": pd.Timestamp(position.entry_signal_date) if position.entry_signal_date is not None else pd.NaT,
+        "exit_signal_date": pd.Timestamp(exit_signal_date) if exit_signal_date is not None else pd.NaT,
+        "entry_weight": position.weight,
+        "entry_price": position.entry_price,
+        "exit_price": exit_price,
+        "entry_score": position.entry_score,
+        "holding_days": holding_days,
+        "exit_reason": exit_reason,
+        "realized_return_pct": realized_return_pct,
+    })
+
+
+def _build_portfolio_selections_from_reviews(review_snapshots, review_log_df, prepared_ticker_data):
+    if review_log_df.empty or not review_snapshots:
+        return pd.DataFrame(columns=[
+            "rebalance_date", "signal_date", "entry_date", "exit_date", "ticker",
+            "position_type", "rank", "score", "entry_price", "exit_price",
+            "realized_return_pct", "realized_10d_return_pct", "weight",
+            "position_entry_date",
+        ])
+
+    review_df = review_log_df.sort_values("review_date").reset_index(drop=True)
+    snapshot_df = pd.DataFrame(review_snapshots)
+    selections = []
+
+    for idx in range(len(review_df) - 1):
+        review_row = review_df.iloc[idx]
+        next_review_row = review_df.iloc[idx + 1]
+        review_id = int(review_row["review_id"])
+        review_date = pd.Timestamp(review_row["review_date"])
+        next_review_date = pd.Timestamp(next_review_row["review_date"])
+        signal_date = pd.Timestamp(review_row["signal_date"])
+        review_positions = snapshot_df[snapshot_df["review_id"] == review_id]
+        if review_positions.empty:
+            continue
+
+        for _, row in review_positions.iterrows():
+            ticker = row["ticker"]
+            prepared = prepared_ticker_data.get(ticker)
+            entry_price = _lookup_ffill_price(prepared, review_date) if prepared is not None else np.nan
+            exit_price = _lookup_ffill_price(prepared, next_review_date) if prepared is not None else np.nan
+            if pd.isna(entry_price) or pd.isna(exit_price) or entry_price <= 0 or exit_price <= 0:
+                continue
+
+            realized = (float(exit_price) / float(entry_price) - 1.0) * 100.0
+            if row["position_type"] == "SHORT":
+                realized = -realized
+
+            selections.append({
+                "rebalance_date": signal_date,
+                "signal_date": signal_date,
+                "entry_date": review_date,
+                "exit_date": next_review_date,
+                "ticker": ticker,
+                "position_type": row["position_type"],
+                "rank": row.get("rank", np.nan),
+                "score": row.get("score", np.nan),
+                "entry_price": float(entry_price),
+                "exit_price": float(exit_price),
+                "realized_return_pct": realized,
+                "realized_10d_return_pct": realized,
+                "weight": row.get("weight", np.nan),
+                "position_entry_date": row.get("position_entry_date", pd.NaT),
+            })
+
+    return pd.DataFrame(selections)
+
+
+def _empty_portfolio_result():
+    empty_df = pd.DataFrame(
+        columns=[
+            "date",
+            "daily_ret_bps",
+            "gross_daily_ret_bps",
+            "net_daily_ret_bps",
+            "long_pnl_bps",
+            "short_pnl_bps",
+            "num_longs",
+            "num_shorts",
+            "cost_bps_applied",
+            "rebalance_signal_date",
+            "reviewed_today",
+            "executed_today",
+            "review_reason",
+            "turnover_total",
+            "turnover_long",
+            "turnover_short",
+            "period_length_days",
+            "return_granularity",
+        ]
+    )
+    return {
+        "pnl_df": empty_df,
+        "review_log_df": pd.DataFrame(),
+        "trade_log_df": pd.DataFrame(),
+        "holdings_log_df": pd.DataFrame(),
+        "portfolio_selections_df": pd.DataFrame(),
+    }
+
+
+def _mark_to_market_period_bps(positions, prepared_ticker_data, period_end_date):
+    gross_long_pnl_bps = 0.0
+    gross_short_pnl_bps = 0.0
+    updated_positions = {}
+
+    for ticker, position in positions.items():
+        prepared = prepared_ticker_data.get(ticker)
+        current_price = _lookup_ffill_price(prepared, period_end_date) if prepared is not None else np.nan
+        last_price = position.last_price
+        if pd.notna(current_price) and current_price > 0 and last_price and last_price > 0:
+            period_ret = current_price / last_price - 1.0
+            pnl_component = position.weight * period_ret * 10000
+            if position.weight > 0:
+                gross_long_pnl_bps += pnl_component
+            else:
+                gross_short_pnl_bps += pnl_component
+            updated_positions[ticker] = PositionState(
+                ticker=position.ticker,
+                side=position.side,
+                weight=position.weight,
+                entry_date=position.entry_date,
+                entry_signal_date=position.entry_signal_date,
+                entry_price=position.entry_price,
+                entry_score=position.entry_score,
+                last_price=float(current_price),
+            )
+        else:
+            updated_positions[ticker] = position
+
+    return gross_long_pnl_bps, gross_short_pnl_bps, updated_positions
+
+
+def _filter_target_weights_for_review_eligibility(
+    target_weights,
+    prepared_ticker_data,
+    membership_lookup,
+    signal_date,
+    trade_date,
+):
+    """Drop weights that are no longer eligible at this review.
+
+    Candidate construction already applies membership and price filters for new
+    entries. This guard also applies them to retained positions and fallback
+    weights, so stale/delisted names are forced out instead of being carried.
     """
-    
+    eligible_weights = {}
+    for ticker, weight in (target_weights or {}).items():
+        weight = float(weight)
+        if abs(weight) <= 1e-12:
+            continue
+        if not _is_membership_active(membership_lookup, ticker, signal_date):
+            continue
+        prepared = prepared_ticker_data.get(ticker)
+        price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
+        if not has_min_trade_price(price):
+            continue
+        eligible_weights[ticker] = weight
+    return eligible_weights
+
+
+def _build_factor_portfolio_periodic_static(
+    all_data,
+    spy_df,
+    rebalance_dates,
+    score_type,
+    regime_map,
+    config,
+    trading_dates,
+    candidate_pool_config,
+    membership_lookup,
+):
+    explicit_llm_mode = _is_explicit_llm_backtest(all_data)
+    close_only_mode = _is_close_only_dataset(all_data)
+    require_exact_candidate_dates = close_only_mode and _looks_like_russell_dataset(all_data)
+    explicit_llm_signal_dates = _available_explicit_llm_signal_dates(all_data) if explicit_llm_mode else []
+
     pnl_records = []
-    
+    review_records = []
+    trade_records = []
+    holdings_records = []
+    review_snapshots = []
+
     print(f"\n📊 Building factor portfolio...")
-    print(f"   Long leg : Top    {TOP_N}")
-    print(f"   Short leg: Bottom {BOTTOM_N}")
+    print(f"   Long leg : Top    {config.top_n}")
+    print(f"   Short leg: Bottom {config.bottom_n}")
     print(f"   Gross exposure: 2.0x (long-short market-neutral)")
-    print(f"   Rebalance period: {REBALANCE_DAYS} days")
     print(f"   Cost model: {COST_RATE*10000:.0f} bps one-way")
     print(f"   Min entry price: > ${MIN_TRADE_PRICE:.2f}")
     print(f"   Score type: {score_type}")
-    print(f"   Rebalance dates: {len(rebalance_dates)}\n")
-    
-    # Normalize all dates to pd.Timestamp
+    print(f"   Policy: {_summarize_policy_label(config)}")
+    print(f"   Candidate pool: {candidate_pool_config.describe()}")
+    print(f"   Weighting mode: {config.weighting_mode}")
+    print("   Return path: periodic static (review-to-review)")
+    print(f"   Price source: {'adj_close (close-only Russell path)' if close_only_mode else 'adj_open (legacy open-execution path)'}")
+    print(
+        "   Russell membership gating: "
+        f"{'enabled' if membership_lookup is not None else 'disabled'}"
+    )
+    if explicit_llm_mode:
+        print("   Execution path: explicit LLM baskets")
+        print(f"   Cached LLM decision dates: {len(explicit_llm_signal_dates)}")
+
     for ticker in all_data:
         all_data[ticker]["date"] = pd.to_datetime(all_data[ticker]["date"])
     spy_df["date"] = pd.to_datetime(spy_df["date"])
-    
-    # Master calendar from SPY
+
     calendar_dates = [pd.Timestamp(d) for d in sorted(pd.to_datetime(spy_df["date"].values).unique())]
-    execution_schedule = _build_execution_schedule(calendar_dates, rebalance_dates)
-    if not execution_schedule:
-        return pd.DataFrame(columns=[
-            "date", "daily_ret_bps", "long_pnl_bps", "short_pnl_bps",
-            "num_longs", "num_shorts", "cost_bps_applied", "rebalance_signal_date",
-        ])
+    trade_signal_map = _build_trade_signal_map(calendar_dates, close_only=close_only_mode)
+    calendar_index = {date: idx for idx, date in enumerate(calendar_dates)}
 
-    first_execution = min(execution_schedule.keys())
-    all_dates = [d for d in calendar_dates if d >= first_execution]
+    if trading_dates is None:
+        all_trade_dates = [date for date in calendar_dates if date in trade_signal_map]
+    else:
+        all_trade_dates = [pd.Timestamp(date) for date in trading_dates if pd.Timestamp(date) in trade_signal_map]
+    if not all_trade_dates:
+        return _empty_portfolio_result()
 
-    # Pre-align opens to the SPY calendar.
-    # Forward-fill handles non-trading stock days as stale-open / zero-return days.
-    print(f"   Execution model: {CANONICAL_EXECUTION_MODEL} (signal close -> next open)")
-    print("   Pre-aligning opens to SPY calendar (forward-fill)...")
-    price_matrix = {}  # ticker -> pd.Series indexed by SPY dates
-    score_matrix = {}  # ticker -> raw scores indexed by signal date
+    print(f"   Trading dates: {len(all_trade_dates)}")
+
+    dense_price_histories = {}
+    preferred_price_column = "adj_close" if close_only_mode else "adj_open"
+    if _looks_like_russell_dataset(all_data) and _USE_RUSSELL_DENSE_PRICE_ENRICHMENT:
+        try:
+            dense_price_histories = _load_dense_price_histories(all_data.keys())
+            if dense_price_histories:
+                print(f"   Dense Russell price histories loaded: {len(dense_price_histories)} tickers")
+        except Exception as exc:
+            print(f"   ⚠️  Dense Russell price enrichment unavailable: {exc}")
+    elif _looks_like_russell_dataset(all_data):
+        print("   Dense Russell price enrichment: disabled (using score-file prices to avoid OOM)")
+
+    prepared_ticker_data = {}
     for ticker, df in all_data.items():
-        df_indexed = df.set_index("date")
-        price_matrix[ticker] = df_indexed["adj_open"].reindex(all_dates).ffill()
-        score_matrix[ticker] = df_indexed[score_type]
-    
-    positions = {}   # ticker -> {'weight': float, 'last_price': float}
-    old_weights = {} # previous period weights for turnover calc
-    
-    for trade_date in all_dates:
-        long_pnl_bps = 0.0
-        short_pnl_bps = 0.0
-        cost_today    = 0.0
-        num_longs = 0
-        num_shorts = 0
-        
-        # ── Step 1: Mark-to-market existing positions open-to-open ───────────
-        for ticker, pos_info in list(positions.items()):
-            current_price = price_matrix[ticker].get(trade_date, np.nan) if ticker in price_matrix else np.nan
-            last_price = pos_info["last_price"]
-            weight = pos_info["weight"]
-            
-            if pd.notna(current_price) and current_price > 0 and last_price > 0:
-                daily_ret = (current_price / last_price - 1.0)
-                daily_pnl_component = weight * daily_ret * 10000
-                
-                if weight > 0:
-                    long_pnl_bps += daily_pnl_component
-                else:
-                    short_pnl_bps += daily_pnl_component
-                
-                positions[ticker]["last_price"] = current_price
-            # NaN price (pre-IPO): forward-fill handles this; 0 contribution
-            
-        # ── Step 2: Rebalance at today's open using prior-close signals ──────
-        signal_date = execution_schedule.get(trade_date)
-        if signal_date is not None:
-            date_scores = {}
-            for ticker in all_data:
-                score = score_matrix[ticker].get(signal_date, np.nan) if ticker in score_matrix else np.nan
-                price = price_matrix[ticker].get(trade_date, np.nan) if ticker in price_matrix else np.nan
-                if pd.notna(score) and has_min_trade_price(price):
-                    date_scores[ticker] = (score, price)
-            
-            if len(date_scores) >= TOP_N + BOTTOM_N:
-                sorted_tickers = sorted(date_scores.keys(), key=lambda t: date_scores[t][0], reverse=True)
-                
-                # Simple long-short construction: top N long, bottom N short
-                new_weights = {}
-                # Long positions (top N)
-                for i in range(TOP_N):
-                    new_weights[sorted_tickers[i]] = 1.0 / TOP_N
-                # Short positions (bottom N)
-                for i in range(BOTTOM_N):
-                    new_weights[sorted_tickers[-(i + 1)]] = -1.0 / BOTTOM_N
-                
-                # Turnover and transaction cost — per-leg attribution
-                all_tickers_in_turnover = set(old_weights.keys()) | set(new_weights.keys())
-                turnover = 0.0
-                long_turnover = 0.0
-                short_turnover = 0.0
-                for t in all_tickers_in_turnover:
-                    nw = new_weights.get(t, 0.0)
-                    ow = old_weights.get(t, 0.0)
-                    delta = abs(nw - ow)
-                    turnover += delta
-                    if nw >= 0 and ow >= 0:
-                        # Stays in long leg (or enters/exits long)
-                        long_turnover += delta
-                    elif nw <= 0 and ow <= 0:
-                        # Stays in short leg (or enters/exits short)
-                        short_turnover += delta
-                    elif ow > 0 and nw < 0:
-                        # Flips long → short: split at zero boundary
-                        long_turnover += ow        # closing the long
-                        short_turnover += abs(nw)   # opening the short
+        prepared_ticker_data[ticker] = _prepare_ticker_data(
+            df,
+            score_type,
+            price_df=dense_price_histories.get(ticker),
+            preferred_price_column=preferred_price_column,
+        )
+
+    review_trade_dates = [
+        trade_date
+        for trade_date in all_trade_dates
+        if pd.Timestamp(trade_signal_map.get(trade_date)) in config.review_policy.scheduled_signal_dates
+    ]
+    if not review_trade_dates:
+        return _empty_portfolio_result()
+
+    positions = {}
+    old_weights = {}
+    previous_regime = None
+    review_id = 0
+    previous_anchor_trade_date = None
+
+    for trade_date in review_trade_dates:
+        signal_date = trade_signal_map.get(trade_date)
+        current_regime = regime_map.get(pd.Timestamp(signal_date), "unknown") if regime_map else "unknown"
+
+        if previous_anchor_trade_date is None:
+            gross_long_pnl_bps = 0.0
+            gross_short_pnl_bps = 0.0
+            period_length_days = 1
+        else:
+            gross_long_pnl_bps, gross_short_pnl_bps, positions = _mark_to_market_period_bps(
+                positions,
+                prepared_ticker_data,
+                trade_date,
+            )
+            period_length_days = max(1, calendar_index.get(pd.Timestamp(trade_date), 0) - calendar_index.get(pd.Timestamp(previous_anchor_trade_date), 0))
+
+        review_id += 1
+        review_reason = "scheduled_interval"
+        num_longs_before_review = sum(1 for position in positions.values() if position.weight > 0)
+        num_shorts_before_review = sum(1 for position in positions.values() if position.weight < 0)
+
+        target_weights_raw = None
+        target_longs = []
+        target_shorts = []
+        candidate_info = {
+            "date_scores": {},
+            "long_candidates": [],
+            "short_candidates": [],
+            "long_rank_map": {},
+            "short_rank_map": {},
+        }
+
+        if explicit_llm_mode:
+            candidate_info = _explicit_llm_snapshot(
+                all_data,
+                score_type,
+                signal_date,
+                trade_date,
+                prepared_ticker_data,
+                available_signal_dates=explicit_llm_signal_dates,
+                membership_lookup=membership_lookup,
+            )
+            target_weights_raw = candidate_info["target_weights"]
+            target_longs = [ticker for ticker, weight in target_weights_raw.items() if weight > 0]
+            target_shorts = [ticker for ticker, weight in target_weights_raw.items() if weight < 0]
+        else:
+            candidate_info = _candidate_snapshot(
+                score_type,
+                prepared_ticker_data,
+                signal_date,
+                trade_date,
+                require_exact_dates=require_exact_candidate_dates,
+                candidate_pool_config=candidate_pool_config,
+                membership_lookup=membership_lookup,
+            )
+            if len(candidate_info["date_scores"]) >= config.top_n + config.bottom_n:
+                current_longs = [ticker for ticker, position in positions.items() if position.weight > 0]
+                current_shorts = [ticker for ticker, position in positions.items() if position.weight < 0]
+                target_longs, target_shorts = config.hysteresis_policy.target_book(
+                    current_longs=current_longs,
+                    current_shorts=current_shorts,
+                    candidate_longs=candidate_info["long_candidates"],
+                    candidate_shorts=candidate_info["short_candidates"],
+                    long_rank_map=candidate_info["long_rank_map"],
+                    short_rank_map=candidate_info["short_rank_map"],
+                )
+                target_weights_raw = build_target_weights(
+                    target_longs,
+                    target_shorts,
+                    weighting_mode=config.weighting_mode,
+                )
+            else:
+                review_reason = f"{review_reason}_insufficient_candidates"
+
+        review_decision = ReviewDecision(
+            due=True,
+            reason=review_reason,
+            review_date=pd.Timestamp(trade_date),
+            signal_date=pd.Timestamp(signal_date) if signal_date is not None else None,
+            regime=current_regime,
+            candidate_longs=tuple(candidate_info["long_candidates"][:config.top_n]),
+            candidate_shorts=tuple(candidate_info["short_candidates"][:config.bottom_n]),
+            target_longs=tuple(target_longs),
+            target_shorts=tuple(target_shorts),
+        )
+
+        if not target_weights_raw:
+            target_weights_raw = dict(old_weights)
+        target_weights_raw = _filter_target_weights_for_review_eligibility(
+            target_weights_raw,
+            prepared_ticker_data,
+            membership_lookup,
+            signal_date,
+            trade_date,
+        )
+
+        trade_decision = compute_trade_decision(
+            old_weights=old_weights,
+            target_weights=target_weights_raw,
+            cost_rate=COST_RATE,
+            min_weight_delta=config.hysteresis_policy.min_weight_delta,
+        )
+        executed_today = trade_decision.executed
+        turnover_total = trade_decision.turnover_total
+        turnover_long = trade_decision.turnover_long
+        turnover_short = trade_decision.turnover_short
+        cost_today = trade_decision.cost_bps
+        long_entries = trade_decision.long_entries
+        long_exits = trade_decision.long_exits
+        short_entries = trade_decision.short_entries
+        short_exits = trade_decision.short_exits
+        replacements = trade_decision.replacements
+
+        if executed_today:
+            new_positions = dict(positions)
+            tickers_in_trade = set(old_weights.keys()) | set(trade_decision.target_weights.keys())
+            for ticker in tickers_in_trade:
+                old_weight = float(old_weights.get(ticker, 0.0))
+                new_weight = float(trade_decision.target_weights.get(ticker, 0.0))
+                if abs(new_weight - old_weight) <= 1e-12:
+                    continue
+
+                old_side = "LONG" if old_weight > 0 else "SHORT" if old_weight < 0 else ""
+                new_side = "LONG" if new_weight > 0 else "SHORT" if new_weight < 0 else ""
+                old_position = positions.get(ticker)
+                prepared = prepared_ticker_data.get(ticker)
+                current_price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
+
+                if old_position is not None and old_side and old_side != new_side:
+                    _close_position_segment(
+                        holdings_records=holdings_records,
+                        position=old_position,
+                        exit_date=trade_date,
+                        exit_signal_date=signal_date,
+                        exit_price=current_price,
+                        exit_reason="flip" if new_side else "review_exit",
+                        calendar_index=calendar_index,
+                    )
+                    new_positions.pop(ticker, None)
+                elif old_position is not None and not new_side:
+                    _close_position_segment(
+                        holdings_records=holdings_records,
+                        position=old_position,
+                        exit_date=trade_date,
+                        exit_signal_date=signal_date,
+                        exit_price=current_price,
+                        exit_reason="review_exit",
+                        calendar_index=calendar_index,
+                    )
+                    new_positions.pop(ticker, None)
+
+                current_score = candidate_info["date_scores"].get(ticker, {}).get("score", np.nan)
+                if pd.isna(current_score) and old_position is not None:
+                    current_score = old_position.entry_score
+
+                if new_side:
+                    if old_side == new_side and old_position is not None:
+                        new_positions[ticker] = PositionState(
+                            ticker=ticker,
+                            side=new_side,
+                            weight=new_weight,
+                            entry_date=old_position.entry_date,
+                            entry_signal_date=old_position.entry_signal_date,
+                            entry_price=old_position.entry_price,
+                            entry_score=old_position.entry_score,
+                            last_price=float(current_price) if pd.notna(current_price) else old_position.last_price,
+                        )
                     else:
-                        # Flips short → long
-                        short_turnover += abs(ow)   # closing the short
-                        long_turnover += nw          # opening the long
+                        new_positions[ticker] = PositionState(
+                            ticker=ticker,
+                            side=new_side,
+                            weight=new_weight,
+                            entry_date=pd.Timestamp(trade_date),
+                            entry_signal_date=pd.Timestamp(signal_date) if signal_date is not None else None,
+                            entry_price=float(current_price) if pd.notna(current_price) else np.nan,
+                            entry_score=float(current_score) if pd.notna(current_score) else np.nan,
+                            last_price=float(current_price) if pd.notna(current_price) else np.nan,
+                        )
 
-                long_cost_bps  = COST_RATE * long_turnover * 10000
-                short_cost_bps = COST_RATE * short_turnover * 10000
-                long_pnl_bps  -= long_cost_bps
-                short_pnl_bps -= short_cost_bps
-                cost_today = long_cost_bps + short_cost_bps
-                
-                # Reset positions at today's open; accrual resumes from this open.
-                positions = {}
-                for ticker, weight in new_weights.items():
-                    price = price_matrix[ticker].get(trade_date, np.nan) if ticker in price_matrix else np.nan
-                    if has_min_trade_price(price):
-                        positions[ticker] = {"weight": weight, "last_price": price}
-                
-                # Track old_weights from ACTUAL positions, not intended (avoids phantom turnover)
-                old_weights = {t: p["weight"] for t, p in positions.items()}
-        
-        num_longs = sum(1 for pos in positions.values() if pos["weight"] > 0)
-        num_shorts = sum(1 for pos in positions.values() if pos["weight"] < 0)
+                if old_side and new_side and old_side != new_side:
+                    action = f"FLIP_TO_{new_side}"
+                elif not old_side and new_side:
+                    action = "ENTER"
+                elif old_side and not new_side:
+                    action = "EXIT"
+                elif abs(new_weight) > abs(old_weight):
+                    action = "INCREASE"
+                else:
+                    action = "DECREASE"
 
-        # Compute total daily return as sum of long and short
-        daily_pnl_bps = long_pnl_bps + short_pnl_bps
-        
+                trade_records.append({
+                    "trade_date": trade_date,
+                    "signal_date": signal_date,
+                    "regime": current_regime,
+                    "review_reason": review_reason,
+                    "ticker": ticker,
+                    "action": action,
+                    "from_weight": old_weight,
+                    "to_weight": new_weight,
+                    "delta_weight": new_weight - old_weight,
+                    "from_side": old_side,
+                    "to_side": new_side,
+                    "old_rank": candidate_info["long_rank_map"].get(ticker) if old_side == "LONG" else candidate_info["short_rank_map"].get(ticker),
+                    "new_rank": candidate_info["long_rank_map"].get(ticker) if new_side == "LONG" else candidate_info["short_rank_map"].get(ticker),
+                    "score": current_score,
+                })
+
+            positions = new_positions
+            old_weights = {ticker: position.weight for ticker, position in positions.items()}
+
+        review_records.append({
+            "review_id": review_id,
+            "review_date": trade_date,
+            "signal_date": signal_date,
+            "regime": current_regime,
+            "review_reason": review_reason,
+            "executed": executed_today,
+            "num_longs_before": num_longs_before_review,
+            "num_shorts_before": num_shorts_before_review,
+            "num_longs_after": sum(1 for position in positions.values() if position.weight > 0),
+            "num_shorts_after": sum(1 for position in positions.values() if position.weight < 0),
+            "candidate_longs": len(review_decision.candidate_longs),
+            "candidate_shorts": len(review_decision.candidate_shorts),
+            "target_longs": len(review_decision.target_longs),
+            "target_shorts": len(review_decision.target_shorts),
+            "turnover_total": turnover_total,
+            "turnover_long": turnover_long,
+            "turnover_short": turnover_short,
+            "cost_bps_applied": cost_today,
+            "long_entries": long_entries,
+            "long_exits": long_exits,
+            "short_entries": short_entries,
+            "short_exits": short_exits,
+            "replacements": replacements,
+        })
+
+        for ticker, position in sorted(positions.items(), key=lambda item: (item[1].side, item[0])):
+            if position.weight > 0:
+                rank = candidate_info["long_rank_map"].get(ticker, np.nan)
+                side = "LONG"
+            else:
+                rank = candidate_info["short_rank_map"].get(ticker, np.nan)
+                side = "SHORT"
+            score_value = candidate_info["date_scores"].get(ticker, {}).get("score", position.entry_score)
+            review_snapshots.append({
+                "review_id": review_id,
+                "review_date": trade_date,
+                "signal_date": signal_date,
+                "ticker": ticker,
+                "position_type": side,
+                "rank": rank,
+                "score": score_value,
+                "weight": position.weight,
+                "position_entry_date": position.entry_date,
+            })
+
+        long_cost_bps = COST_RATE * turnover_long * 10000
+        short_cost_bps = COST_RATE * turnover_short * 10000
+        long_pnl_bps = gross_long_pnl_bps - long_cost_bps
+        short_pnl_bps = gross_short_pnl_bps - short_cost_bps
+        gross_period_ret_bps = gross_long_pnl_bps + gross_short_pnl_bps
+        net_period_ret_bps = long_pnl_bps + short_pnl_bps
+
         pnl_records.append({
             "date": trade_date,
-            "daily_ret_bps": daily_pnl_bps,
+            "daily_ret_bps": net_period_ret_bps,
+            "gross_daily_ret_bps": gross_period_ret_bps,
+            "net_daily_ret_bps": net_period_ret_bps,
+            "long_pnl_bps": long_pnl_bps,
+            "short_pnl_bps": short_pnl_bps,
+            "num_longs": sum(1 for position in positions.values() if position.weight > 0),
+            "num_shorts": sum(1 for position in positions.values() if position.weight < 0),
+            "cost_bps_applied": cost_today,
+            "rebalance_signal_date": signal_date,
+            "reviewed_today": True,
+            "executed_today": executed_today,
+            "review_reason": review_reason,
+            "turnover_total": turnover_total,
+            "turnover_long": turnover_long,
+            "turnover_short": turnover_short,
+            "period_length_days": period_length_days,
+            "return_granularity": "periodic_static",
+        })
+
+        previous_regime = current_regime
+        previous_anchor_trade_date = trade_date
+
+    final_trade_date = all_trade_dates[-1]
+    final_signal_date = trade_signal_map.get(final_trade_date)
+    if previous_anchor_trade_date is not None and final_trade_date > previous_anchor_trade_date and positions:
+        gross_long_pnl_bps, gross_short_pnl_bps, positions = _mark_to_market_period_bps(
+            positions,
+            prepared_ticker_data,
+            final_trade_date,
+        )
+        period_length_days = max(1, calendar_index.get(pd.Timestamp(final_trade_date), 0) - calendar_index.get(pd.Timestamp(previous_anchor_trade_date), 0))
+        pnl_records.append({
+            "date": final_trade_date,
+            "daily_ret_bps": gross_long_pnl_bps + gross_short_pnl_bps,
+            "gross_daily_ret_bps": gross_long_pnl_bps + gross_short_pnl_bps,
+            "net_daily_ret_bps": gross_long_pnl_bps + gross_short_pnl_bps,
+            "long_pnl_bps": gross_long_pnl_bps,
+            "short_pnl_bps": gross_short_pnl_bps,
+            "num_longs": sum(1 for position in positions.values() if position.weight > 0),
+            "num_shorts": sum(1 for position in positions.values() if position.weight < 0),
+            "cost_bps_applied": 0.0,
+            "rebalance_signal_date": pd.NaT,
+            "reviewed_today": False,
+            "executed_today": False,
+            "review_reason": "",
+            "turnover_total": 0.0,
+            "turnover_long": 0.0,
+            "turnover_short": 0.0,
+            "period_length_days": period_length_days,
+            "return_granularity": "periodic_static",
+        })
+
+    for ticker, position in list(positions.items()):
+        prepared = prepared_ticker_data.get(ticker)
+        exit_price = _lookup_ffill_price(prepared, final_trade_date) if prepared is not None else np.nan
+        _close_position_segment(
+            holdings_records=holdings_records,
+            position=position,
+            exit_date=final_trade_date,
+            exit_signal_date=final_signal_date,
+            exit_price=exit_price,
+            exit_reason="end_of_backtest",
+            calendar_index=calendar_index,
+        )
+
+    review_log_df = pd.DataFrame(review_records)
+    portfolio_selections_df = _build_portfolio_selections_from_reviews(
+        review_snapshots,
+        review_log_df,
+        prepared_ticker_data,
+    )
+    return {
+        "pnl_df": pd.DataFrame(pnl_records),
+        "review_log_df": review_log_df,
+        "trade_log_df": pd.DataFrame(trade_records),
+        "holdings_log_df": pd.DataFrame(holdings_records),
+        "portfolio_selections_df": portfolio_selections_df,
+    }
+
+def build_factor_portfolio(
+    all_data,
+    spy_df,
+    rebalance_dates,
+    score_type="direction_score",
+    regime_map=None,
+    config=None,
+    trading_dates=None,
+    candidate_pool_config: CandidatePoolConfig | None = None,
+    membership_lookup: RussellMembershipLookup | None = None,
+    periodic_static: bool = False,
+):
+    """Build portfolio returns with review timing separated from trade execution."""
+
+    explicit_llm_mode = _is_explicit_llm_backtest(all_data)
+    close_only_mode = _is_close_only_dataset(all_data)
+    candidate_pool_config = candidate_pool_config or CandidatePoolConfig()
+    require_exact_candidate_dates = close_only_mode and _looks_like_russell_dataset(all_data)
+    explicit_llm_signal_dates = _available_explicit_llm_signal_dates(all_data) if explicit_llm_mode else []
+    if config is None:
+        config = PortfolioConstructionConfig(
+            review_policy=ReviewPolicy(
+                mode="static",
+                static_review_days=REBALANCE_DAYS,
+                regime_intervals=DEFAULT_REGIME_REVIEW_INTERVALS.copy(),
+                scheduled_signal_dates=frozenset(pd.to_datetime(rebalance_dates)),
+            ),
+            hysteresis_policy=HysteresisPolicy(
+                mode="none",
+                top_n=TOP_N,
+                bottom_n=BOTTOM_N,
+            ),
+            top_n=TOP_N,
+            bottom_n=BOTTOM_N,
+            weighting_mode="equal",
+        )
+    elif explicit_llm_mode:
+        # Explicit LLM backtests should review on the cached LLM decision dates
+        # rather than on the deterministic review cadence.
+        config = PortfolioConstructionConfig(
+            review_policy=ReviewPolicy(
+                mode="static",
+                static_review_days=config.review_policy.static_review_days,
+                regime_intervals=config.review_policy.regime_intervals,
+                early_review_regimes=config.review_policy.early_review_regimes,
+                scheduled_signal_dates=frozenset(explicit_llm_signal_dates),
+            ),
+            hysteresis_policy=config.hysteresis_policy,
+            top_n=config.top_n,
+            bottom_n=config.bottom_n,
+            weighting_mode=config.weighting_mode,
+        )
+
+    if periodic_static:
+        if config.review_policy.mode != "static":
+            raise ValueError("--periodic-static currently supports review_mode=static only")
+        return _build_factor_portfolio_periodic_static(
+            all_data,
+            spy_df,
+            rebalance_dates,
+            score_type,
+            regime_map,
+            config,
+            trading_dates,
+            candidate_pool_config,
+            membership_lookup,
+        )
+
+    pnl_records = []
+    review_records = []
+    trade_records = []
+    holdings_records = []
+    review_snapshots = []
+
+    print(f"\n📊 Building factor portfolio...")
+    print(f"   Long leg : Top    {config.top_n}")
+    print(f"   Short leg: Bottom {config.bottom_n}")
+    print(f"   Gross exposure: 2.0x (long-short market-neutral)")
+    print(f"   Cost model: {COST_RATE*10000:.0f} bps one-way")
+    print(f"   Min entry price: > ${MIN_TRADE_PRICE:.2f}")
+    print(f"   Score type: {score_type}")
+    print(f"   Policy: {_summarize_policy_label(config)}")
+    print(f"   Candidate pool: {candidate_pool_config.describe()}")
+    print(f"   Weighting mode: {config.weighting_mode}")
+    print(f"   Price source: {'adj_close (close-only Russell path)' if close_only_mode else 'adj_open (legacy open-execution path)'}")
+    print(
+        "   Russell membership gating: "
+        f"{'enabled' if membership_lookup is not None else 'disabled'}"
+    )
+    if explicit_llm_mode:
+        print("   Execution path: explicit LLM baskets")
+        print(f"   Cached LLM decision dates: {len(explicit_llm_signal_dates)}")
+
+    for ticker in all_data:
+        all_data[ticker]["date"] = pd.to_datetime(all_data[ticker]["date"])
+    spy_df["date"] = pd.to_datetime(spy_df["date"])
+
+    calendar_dates = [pd.Timestamp(d) for d in sorted(pd.to_datetime(spy_df["date"].values).unique())]
+    trade_signal_map = _build_trade_signal_map(calendar_dates, close_only=close_only_mode)
+    calendar_index = {date: idx for idx, date in enumerate(calendar_dates)}
+
+    if trading_dates is None:
+        all_trade_dates = [date for date in calendar_dates if date in trade_signal_map]
+    else:
+        all_trade_dates = [pd.Timestamp(date) for date in trading_dates if pd.Timestamp(date) in trade_signal_map]
+    if not all_trade_dates:
+        return _empty_portfolio_result()
+
+    print(f"   Trading dates: {len(all_trade_dates)}")
+    if close_only_mode:
+        print("   Execution model: close_to_close_hold (signal close -> same close reference)")
+        print("   Preparing compact close lookup arrays...")
+    else:
+        print(f"   Execution model: {CANONICAL_EXECUTION_MODEL} (signal close -> next open)")
+        print("   Preparing compact open lookup arrays...")
+
+    dense_price_histories = {}
+    preferred_price_column = "adj_close" if close_only_mode else "adj_open"
+    if _looks_like_russell_dataset(all_data) and _USE_RUSSELL_DENSE_PRICE_ENRICHMENT:
+        try:
+            dense_price_histories = _load_dense_price_histories(all_data.keys())
+            if dense_price_histories:
+                print(f"   Dense Russell price histories loaded: {len(dense_price_histories)} tickers")
+        except Exception as exc:
+            print(f"   ⚠️  Dense Russell price enrichment unavailable: {exc}")
+    elif _looks_like_russell_dataset(all_data):
+        print("   Dense Russell price enrichment: disabled (using score-file prices to avoid OOM)")
+
+    prepared_ticker_data = {}
+    for ticker, df in all_data.items():
+        prepared_ticker_data[ticker] = _prepare_ticker_data(
+            df,
+            score_type,
+            price_df=dense_price_histories.get(ticker),
+            preferred_price_column=preferred_price_column,
+        )
+
+    positions = {}
+    old_weights = {}
+    last_review_loop_index = None
+    previous_regime = None
+    review_id = 0
+
+    for loop_idx, trade_date in enumerate(all_trade_dates):
+        signal_date = trade_signal_map.get(trade_date)
+        current_regime = regime_map.get(pd.Timestamp(signal_date), "unknown") if regime_map else "unknown"
+
+        gross_long_pnl_bps = 0.0
+        gross_short_pnl_bps = 0.0
+
+        for ticker, position in list(positions.items()):
+            prepared = prepared_ticker_data.get(ticker)
+            current_price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
+            last_price = position.last_price
+            if pd.notna(current_price) and current_price > 0 and last_price and last_price > 0:
+                daily_ret = current_price / last_price - 1.0
+                pnl_component = position.weight * daily_ret * 10000
+                if position.weight > 0:
+                    gross_long_pnl_bps += pnl_component
+                else:
+                    gross_short_pnl_bps += pnl_component
+                positions[ticker] = PositionState(
+                    ticker=position.ticker,
+                    side=position.side,
+                    weight=position.weight,
+                    entry_date=position.entry_date,
+                    entry_signal_date=position.entry_signal_date,
+                    entry_price=position.entry_price,
+                    entry_score=position.entry_score,
+                    last_price=float(current_price),
+                )
+
+        reviewed_today = False
+        executed_today = False
+        review_reason = ""
+        turnover_total = 0.0
+        turnover_long = 0.0
+        turnover_short = 0.0
+        cost_today = 0.0
+        long_entries = long_exits = short_entries = short_exits = replacements = 0
+        review_decision = ReviewDecision(
+            due=False,
+            reason="",
+            review_date=None,
+            signal_date=signal_date,
+            regime=current_regime,
+        )
+        candidate_info = {
+            "date_scores": {},
+            "long_candidates": [],
+            "short_candidates": [],
+            "long_rank_map": {},
+            "short_rank_map": {},
+        }
+
+        days_since_last_review = None if last_review_loop_index is None else loop_idx - last_review_loop_index
+        review_due, review_reason = config.review_policy.should_review(
+            signal_date=signal_date,
+            current_regime=current_regime,
+            previous_regime=previous_regime,
+            days_since_last_review=days_since_last_review,
+        )
+
+        if review_due:
+            reviewed_today = True
+            review_id += 1
+            review_reason = review_reason or "scheduled_interval"
+            num_longs_before_review = sum(1 for position in positions.values() if position.weight > 0)
+            num_shorts_before_review = sum(1 for position in positions.values() if position.weight < 0)
+
+            target_weights_raw = None
+            target_longs = []
+            target_shorts = []
+
+            if explicit_llm_mode:
+                candidate_info = _explicit_llm_snapshot(
+                    all_data,
+                    score_type,
+                    signal_date,
+                    trade_date,
+                    prepared_ticker_data,
+                    available_signal_dates=explicit_llm_signal_dates,
+                    membership_lookup=membership_lookup,
+                )
+                target_weights_raw = candidate_info["target_weights"]
+                target_longs = [ticker for ticker, weight in target_weights_raw.items() if weight > 0]
+                target_shorts = [ticker for ticker, weight in target_weights_raw.items() if weight < 0]
+            else:
+                candidate_info = _candidate_snapshot(
+                    score_type,
+                    prepared_ticker_data,
+                    signal_date,
+                    trade_date,
+                    require_exact_dates=require_exact_candidate_dates,
+                    candidate_pool_config=candidate_pool_config,
+                    membership_lookup=membership_lookup,
+                )
+                if len(candidate_info["date_scores"]) >= config.top_n + config.bottom_n:
+                    current_longs = [ticker for ticker, position in positions.items() if position.weight > 0]
+                    current_shorts = [ticker for ticker, position in positions.items() if position.weight < 0]
+                    target_longs, target_shorts = config.hysteresis_policy.target_book(
+                        current_longs=current_longs,
+                        current_shorts=current_shorts,
+                        candidate_longs=candidate_info["long_candidates"],
+                        candidate_shorts=candidate_info["short_candidates"],
+                        long_rank_map=candidate_info["long_rank_map"],
+                        short_rank_map=candidate_info["short_rank_map"],
+                    )
+                    target_weights_raw = build_target_weights(
+                        target_longs,
+                        target_shorts,
+                        weighting_mode=config.weighting_mode,
+                    )
+                else:
+                    review_reason = f"{review_reason}_insufficient_candidates"
+
+                review_decision = ReviewDecision(
+                due=True,
+                reason=review_reason,
+                review_date=pd.Timestamp(trade_date),
+                signal_date=pd.Timestamp(signal_date) if signal_date is not None else None,
+                regime=current_regime,
+                candidate_longs=tuple(candidate_info["long_candidates"][:config.top_n]),
+                candidate_shorts=tuple(candidate_info["short_candidates"][:config.bottom_n]),
+                target_longs=tuple(target_longs),
+                target_shorts=tuple(target_shorts),
+            )
+
+            if not target_weights_raw:
+                target_weights_raw = dict(old_weights)
+            target_weights_raw = _filter_target_weights_for_review_eligibility(
+                target_weights_raw,
+                prepared_ticker_data,
+                membership_lookup,
+                signal_date,
+                trade_date,
+            )
+
+            trade_decision = compute_trade_decision(
+                old_weights=old_weights,
+                target_weights=target_weights_raw,
+                cost_rate=COST_RATE,
+                min_weight_delta=config.hysteresis_policy.min_weight_delta,
+            )
+            executed_today = trade_decision.executed
+            turnover_total = trade_decision.turnover_total
+            turnover_long = trade_decision.turnover_long
+            turnover_short = trade_decision.turnover_short
+            cost_today = trade_decision.cost_bps
+            long_entries = trade_decision.long_entries
+            long_exits = trade_decision.long_exits
+            short_entries = trade_decision.short_entries
+            short_exits = trade_decision.short_exits
+            replacements = trade_decision.replacements
+
+            if executed_today:
+                new_positions = dict(positions)
+                tickers_in_trade = set(old_weights.keys()) | set(trade_decision.target_weights.keys())
+                for ticker in tickers_in_trade:
+                    old_weight = float(old_weights.get(ticker, 0.0))
+                    new_weight = float(trade_decision.target_weights.get(ticker, 0.0))
+                    if abs(new_weight - old_weight) <= 1e-12:
+                        continue
+
+                    old_side = "LONG" if old_weight > 0 else "SHORT" if old_weight < 0 else ""
+                    new_side = "LONG" if new_weight > 0 else "SHORT" if new_weight < 0 else ""
+                    old_position = positions.get(ticker)
+                    prepared = prepared_ticker_data.get(ticker)
+                    current_price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
+
+                    if old_position is not None and old_side and old_side != new_side:
+                        _close_position_segment(
+                            holdings_records=holdings_records,
+                            position=old_position,
+                            exit_date=trade_date,
+                            exit_signal_date=signal_date,
+                            exit_price=current_price,
+                            exit_reason="flip" if new_side else "review_exit",
+                            calendar_index=calendar_index,
+                        )
+                        new_positions.pop(ticker, None)
+                    elif old_position is not None and not new_side:
+                        _close_position_segment(
+                            holdings_records=holdings_records,
+                            position=old_position,
+                            exit_date=trade_date,
+                            exit_signal_date=signal_date,
+                            exit_price=current_price,
+                            exit_reason="review_exit",
+                            calendar_index=calendar_index,
+                        )
+                        new_positions.pop(ticker, None)
+
+                    current_score = candidate_info["date_scores"].get(ticker, {}).get("score", np.nan)
+                    if pd.isna(current_score) and old_position is not None:
+                        current_score = old_position.entry_score
+
+                    if new_side:
+                        if old_side == new_side and old_position is not None:
+                            new_positions[ticker] = PositionState(
+                                ticker=ticker,
+                                side=new_side,
+                                weight=new_weight,
+                                entry_date=old_position.entry_date,
+                                entry_signal_date=old_position.entry_signal_date,
+                                entry_price=old_position.entry_price,
+                                entry_score=old_position.entry_score,
+                                last_price=float(current_price) if pd.notna(current_price) else old_position.last_price,
+                            )
+                        else:
+                            new_positions[ticker] = PositionState(
+                                ticker=ticker,
+                                side=new_side,
+                                weight=new_weight,
+                                entry_date=pd.Timestamp(trade_date),
+                                entry_signal_date=pd.Timestamp(signal_date) if signal_date is not None else None,
+                                entry_price=float(current_price) if pd.notna(current_price) else np.nan,
+                                entry_score=float(current_score) if pd.notna(current_score) else np.nan,
+                                last_price=float(current_price) if pd.notna(current_price) else np.nan,
+                            )
+
+                    if old_side and new_side and old_side != new_side:
+                        action = f"FLIP_TO_{new_side}"
+                    elif not old_side and new_side:
+                        action = "ENTER"
+                    elif old_side and not new_side:
+                        action = "EXIT"
+                    elif abs(new_weight) > abs(old_weight):
+                        action = "INCREASE"
+                    else:
+                        action = "DECREASE"
+
+                    trade_records.append({
+                        "trade_date": trade_date,
+                        "signal_date": signal_date,
+                        "regime": current_regime,
+                        "review_reason": review_reason,
+                        "ticker": ticker,
+                        "action": action,
+                        "from_weight": old_weight,
+                        "to_weight": new_weight,
+                        "delta_weight": new_weight - old_weight,
+                        "from_side": old_side,
+                        "to_side": new_side,
+                        "old_rank": candidate_info["long_rank_map"].get(ticker) if old_side == "LONG" else candidate_info["short_rank_map"].get(ticker),
+                        "new_rank": candidate_info["long_rank_map"].get(ticker) if new_side == "LONG" else candidate_info["short_rank_map"].get(ticker),
+                        "score": current_score,
+                    })
+
+                positions = new_positions
+                old_weights = {ticker: position.weight for ticker, position in positions.items()}
+
+            last_review_loop_index = loop_idx
+            review_records.append({
+                "review_id": review_id,
+                "review_date": trade_date,
+                "signal_date": signal_date,
+                "regime": current_regime,
+                "review_reason": review_reason,
+                "executed": executed_today,
+                "num_longs_before": num_longs_before_review,
+                "num_shorts_before": num_shorts_before_review,
+                "num_longs_after": sum(1 for position in positions.values() if position.weight > 0),
+                "num_shorts_after": sum(1 for position in positions.values() if position.weight < 0),
+                "candidate_longs": len(review_decision.candidate_longs),
+                "candidate_shorts": len(review_decision.candidate_shorts),
+                "target_longs": len(review_decision.target_longs),
+                "target_shorts": len(review_decision.target_shorts),
+                "turnover_total": turnover_total,
+                "turnover_long": turnover_long,
+                "turnover_short": turnover_short,
+                "cost_bps_applied": cost_today,
+                "long_entries": long_entries,
+                "long_exits": long_exits,
+                "short_entries": short_entries,
+                "short_exits": short_exits,
+                "replacements": replacements,
+            })
+
+            for ticker, position in sorted(positions.items(), key=lambda item: (item[1].side, item[0])):
+                if position.weight > 0:
+                    rank = candidate_info["long_rank_map"].get(ticker, np.nan)
+                    side = "LONG"
+                else:
+                    rank = candidate_info["short_rank_map"].get(ticker, np.nan)
+                    side = "SHORT"
+                score_value = candidate_info["date_scores"].get(ticker, {}).get("score", position.entry_score)
+                review_snapshots.append({
+                    "review_id": review_id,
+                    "review_date": trade_date,
+                    "signal_date": signal_date,
+                    "ticker": ticker,
+                    "position_type": side,
+                    "rank": rank,
+                    "score": score_value,
+                    "weight": position.weight,
+                    "position_entry_date": position.entry_date,
+                })
+
+        long_cost_bps = COST_RATE * turnover_long * 10000
+        short_cost_bps = COST_RATE * turnover_short * 10000
+        long_pnl_bps = gross_long_pnl_bps - long_cost_bps
+        short_pnl_bps = gross_short_pnl_bps - short_cost_bps
+        gross_daily_ret_bps = gross_long_pnl_bps + gross_short_pnl_bps
+        net_daily_ret_bps = long_pnl_bps + short_pnl_bps
+
+        num_longs = sum(1 for position in positions.values() if position.weight > 0)
+        num_shorts = sum(1 for position in positions.values() if position.weight < 0)
+        pnl_records.append({
+            "date": trade_date,
+            "daily_ret_bps": net_daily_ret_bps,
+            "gross_daily_ret_bps": gross_daily_ret_bps,
+            "net_daily_ret_bps": net_daily_ret_bps,
             "long_pnl_bps": long_pnl_bps,
             "short_pnl_bps": short_pnl_bps,
             "num_longs": num_longs,
             "num_shorts": num_shorts,
             "cost_bps_applied": cost_today,
-            "rebalance_signal_date": signal_date,
+            "rebalance_signal_date": signal_date if reviewed_today else pd.NaT,
+            "reviewed_today": reviewed_today,
+            "executed_today": executed_today,
+            "review_reason": review_reason if reviewed_today else "",
+            "turnover_total": turnover_total,
+            "turnover_long": turnover_long,
+            "turnover_short": turnover_short,
         })
-    
+        previous_regime = current_regime
+
+    final_trade_date = all_trade_dates[-1]
+    final_signal_date = trade_signal_map.get(final_trade_date)
+    for ticker, position in list(positions.items()):
+        prepared = prepared_ticker_data.get(ticker)
+        exit_price = _lookup_ffill_price(prepared, final_trade_date) if prepared is not None else np.nan
+        _close_position_segment(
+            holdings_records=holdings_records,
+            position=position,
+            exit_date=final_trade_date,
+            exit_signal_date=final_signal_date,
+            exit_price=exit_price,
+            exit_reason="end_of_backtest",
+            calendar_index=calendar_index,
+        )
+
     pnl_df = pd.DataFrame(pnl_records)
-    return pnl_df
+    review_log_df = pd.DataFrame(review_records)
+    trade_log_df = pd.DataFrame(trade_records)
+    holdings_log_df = pd.DataFrame(holdings_records)
+    portfolio_selections_df = _build_portfolio_selections_from_reviews(
+        review_snapshots,
+        review_log_df,
+        prepared_ticker_data,
+    )
+    if not pnl_df.empty and "gross_daily_ret_bps" in pnl_df.columns:
+        gross_total = pd.to_numeric(pnl_df["gross_daily_ret_bps"], errors="coerce").fillna(0.0).abs().sum()
+        live_book_days = (
+            pd.to_numeric(pnl_df.get("num_longs", 0), errors="coerce").fillna(0.0)
+            + pd.to_numeric(pnl_df.get("num_shorts", 0), errors="coerce").fillna(0.0)
+        ) > 0
+        if live_book_days.any() and np.isclose(gross_total, 0.0):
+            raise RuntimeError(
+                "Degenerate backtest output: positions were held but gross_daily_ret_bps stayed identically zero. "
+                "This usually indicates stale score files or a broken price lookup path."
+            )
+    return {
+        "pnl_df": pnl_df,
+        "review_log_df": review_log_df,
+        "trade_log_df": trade_log_df,
+        "holdings_log_df": holdings_log_df,
+        "portfolio_selections_df": portfolio_selections_df,
+    }
 
 
 # ----------------------------
 # Metrics Calculation
 # ----------------------------
 
-def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="direction_score"):
+def _compute_activity_metrics(pnl_df, review_log_df, trade_log_df, holdings_log_df):
+    overall = {}
+
+    gross_daily = pnl_df["gross_daily_ret_bps"] / 10000 if "gross_daily_ret_bps" in pnl_df.columns else pnl_df["daily_ret_bps"] / 10000
+    net_daily = pnl_df["daily_ret_bps"] / 10000
+    gross_total_ret = ((1 + gross_daily).prod() - 1) * 100 if len(pnl_df) > 0 else 0.0
+    net_total_ret = ((1 + net_daily).prod() - 1) * 100 if len(pnl_df) > 0 else 0.0
+    total_cost_bps = float(pnl_df["cost_bps_applied"].sum()) if "cost_bps_applied" in pnl_df.columns else 0.0
+
+    overall.update({
+        "gross_total_ret": gross_total_ret,
+        "net_total_ret": net_total_ret,
+        "total_cost_bps": total_cost_bps,
+        "cost_drag_ret_pct": gross_total_ret - net_total_ret,
+        "cost_drag_pct_of_gross": ((gross_total_ret - net_total_ret) / abs(gross_total_ret) * 100) if abs(gross_total_ret) > 1e-12 else np.nan,
+    })
+
+    if review_log_df is not None and not review_log_df.empty:
+        executed_reviews = review_log_df[review_log_df["executed"] == True]
+        overall.update({
+            "n_reviews": int(len(review_log_df)),
+            "n_trade_reviews": int(len(executed_reviews)),
+            "review_to_trade_rate": float(len(executed_reviews) / len(review_log_df) * 100),
+            "turnover_mean": float(review_log_df["turnover_total"].mean()),
+            "turnover_long_mean": float(review_log_df["turnover_long"].mean()),
+            "turnover_short_mean": float(review_log_df["turnover_short"].mean()),
+            "total_replacements": int(review_log_df["replacements"].sum()),
+            "replacement_rate": float(review_log_df["replacements"].sum() / max(len(executed_reviews), 1)),
+            "total_entries": int(review_log_df["long_entries"].sum() + review_log_df["short_entries"].sum()),
+            "total_exits": int(review_log_df["long_exits"].sum() + review_log_df["short_exits"].sum()),
+        })
+    else:
+        overall.update({
+            "n_reviews": 0,
+            "n_trade_reviews": 0,
+            "review_to_trade_rate": 0.0,
+            "turnover_mean": np.nan,
+            "turnover_long_mean": np.nan,
+            "turnover_short_mean": np.nan,
+            "total_replacements": 0,
+            "replacement_rate": np.nan,
+            "total_entries": 0,
+            "total_exits": 0,
+        })
+
+    if trade_log_df is not None and not trade_log_df.empty:
+        overall["n_trade_lines"] = int(len(trade_log_df))
+
+    if holdings_log_df is not None and not holdings_log_df.empty:
+        overall["avg_holding_days"] = float(holdings_log_df["holding_days"].mean())
+        long_holds = holdings_log_df[holdings_log_df["position_type"] == "LONG"]["holding_days"]
+        short_holds = holdings_log_df[holdings_log_df["position_type"] == "SHORT"]["holding_days"]
+        overall["avg_holding_days_long"] = float(long_holds.mean()) if len(long_holds) > 0 else np.nan
+        overall["avg_holding_days_short"] = float(short_holds.mean()) if len(short_holds) > 0 else np.nan
+    else:
+        overall["avg_holding_days"] = np.nan
+        overall["avg_holding_days_long"] = np.nan
+        overall["avg_holding_days_short"] = np.nan
+
+    regime_activity = {}
+    if review_log_df is not None and not review_log_df.empty:
+        grouped = review_log_df.groupby("regime")
+        for regime, group in grouped:
+            executed = group[group["executed"] == True]
+            regime_activity[regime] = {
+                "reviews": int(len(group)),
+                "trade_reviews": int(len(executed)),
+                "review_to_trade_rate": float(len(executed) / len(group) * 100),
+                "turnover_mean": float(group["turnover_total"].mean()),
+                "cost_drag_bps": float(group["cost_bps_applied"].sum()),
+            }
+
+    return overall, regime_activity
+
+
+def compute_metrics(
+    pnl_df,
+    regime_map,
+    all_data,
+    review_signal_dates,
+    score_type="direction_score",
+    review_log_df=None,
+    trade_log_df=None,
+    holdings_log_df=None,
+    membership_lookup: RussellMembershipLookup | None = None,
+):
     """Compute performance metrics by regime + cross-sectional IC
     
     Fixes:
@@ -446,6 +2312,18 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
     # Normalize dates to pd.Timestamp
     pnl_df = pnl_df.copy()
     pnl_df["date"] = pd.to_datetime(pnl_df["date"])
+    period_lengths = pd.to_numeric(pnl_df.get("period_length_days", 1), errors="coerce").fillna(1.0).clip(lower=1.0)
+    period_returns = pnl_df["daily_ret_bps"] / 10000
+    dailyized_returns = pd.Series(
+        np.where(
+            (1.0 + period_returns.to_numpy(dtype=float)) > 0,
+            np.power(1.0 + period_returns.to_numpy(dtype=float), 1.0 / period_lengths.to_numpy(dtype=float)) - 1.0,
+            period_returns.to_numpy(dtype=float) / period_lengths.to_numpy(dtype=float),
+        ),
+        index=pnl_df.index,
+        dtype=float,
+    )
+    observation_factor = 252.0 / float(period_lengths.mean()) if len(period_lengths) > 0 else 252.0
     
     # Map regimes with type safety
     pnl_df["regime"] = pnl_df["date"].apply(
@@ -453,15 +2331,16 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
     )
     
     # Compute cumulative return properly
-    pnl_df["daily_ret"] = pnl_df["daily_ret_bps"] / 10000
+    pnl_df["daily_ret"] = period_returns
+    pnl_df["dailyized_ret"] = dailyized_returns
     pnl_df["cumulative_ret"] = (1 + pnl_df["daily_ret"]).cumprod()
     pnl_df["cumulative_ret_pct"] = (pnl_df["cumulative_ret"] - 1) * 100
     
     # Overall metrics
     total_ret = (pnl_df["cumulative_ret"].iloc[-1] - 1) * 100
-    avg_daily_ret = pnl_df["daily_ret_bps"].mean()
-    daily_vol = pnl_df["daily_ret_bps"].std()
-    sharpe = (avg_daily_ret / daily_vol) * np.sqrt(252) if daily_vol > 0 else 0
+    avg_daily_ret = float(dailyized_returns.mean() * 10000)
+    period_vol = pnl_df["daily_ret_bps"].std()
+    sharpe = (pnl_df["daily_ret"].mean() / pnl_df["daily_ret"].std()) * np.sqrt(observation_factor) if pnl_df["daily_ret"].std() > 0 else 0
     
     cumret = pnl_df["cumulative_ret"].values
     running_max = np.maximum.accumulate(cumret)
@@ -470,8 +2349,15 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
     
     # Compute cross-sectional IC on signal dates using the canonical forward labels.
     ics = []
-    for rebalance_date in rebalance_dates:
-        snapshot = _cross_sectional_snapshot(all_data, rebalance_date, score_type)
+    for review_date in review_signal_dates:
+        snapshot = _cross_sectional_snapshot(
+            all_data,
+            review_date,
+            score_type,
+            require_exact_dates=True,
+            selected_only=False,
+            membership_lookup=membership_lookup,
+        )
         if len(snapshot) >= 10:
             ic, pval = spearmanr(snapshot["score"], snapshot["ret"])
             ics.append(ic)
@@ -481,6 +2367,13 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
     ic_tstat = (ic_mean / (ic_std + 1e-10)) * np.sqrt(len(ics)) if ic_std > 0 else 0.0
     ic_pval = 2 * (1 - scipy.stats.t.cdf(abs(ic_tstat), len(ics)-1)) if len(ics) > 1 else 1.0
     
+    activity_overall, regime_activity = _compute_activity_metrics(
+        pnl_df=pnl_df,
+        review_log_df=review_log_df,
+        trade_log_df=trade_log_df,
+        holdings_log_df=holdings_log_df,
+    )
+
     metrics = {
         "overall": {
             "total_ret": total_ret,
@@ -489,10 +2382,13 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
             "maxdd": maxdd,
             "win_rate": (pnl_df["daily_ret_bps"] > 0).sum() / len(pnl_df) * 100,
             "n_trades": len(pnl_df),
+            "observation_factor": observation_factor,
+            "total_period_days": int(period_lengths.sum()),
             "ic_mean": ic_mean,
             "ic_tstat": ic_tstat,
             "ic_pval": ic_pval,
             "n_ic_periods": len(ics),
+            **activity_overall,
         }
     }
     
@@ -502,19 +2398,28 @@ def compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type="d
         if len(regime_data) > 10:
             # Compound only the regime's own daily returns (non-contiguous is fine)
             regime_ret = ((1 + regime_data["daily_ret"]).prod() - 1) * 100
-            regime_vol = regime_data["daily_ret_bps"].std()
-            regime_sharpe = (regime_data["daily_ret_bps"].mean() / regime_vol) * np.sqrt(252) if regime_vol > 0 else 0
+            regime_lengths = pd.to_numeric(regime_data.get("period_length_days", 1), errors="coerce").fillna(1.0).clip(lower=1.0)
+            regime_factor = 252.0 / float(regime_lengths.mean()) if len(regime_lengths) > 0 else 252.0
+            regime_vol = regime_data["daily_ret"].std()
+            regime_sharpe = (regime_data["daily_ret"].mean() / regime_vol) * np.sqrt(regime_factor) if regime_vol > 0 else 0
             
             metrics[regime] = {
                 "total_ret": regime_ret,
                 "sharpe": regime_sharpe,
-                "n_days": len(regime_data)
+                "n_days": int(regime_lengths.sum()),
             }
+            if regime in regime_activity:
+                metrics[regime].update(regime_activity[regime])
     
     return pnl_df, metrics
 
 
-def compute_decile_returns(all_data, rebalance_dates, score_type="direction_score"):
+def compute_decile_returns(
+    all_data,
+    rebalance_dates,
+    score_type="direction_score",
+    membership_lookup: RussellMembershipLookup | None = None,
+):
     """Analyze forward {FORWARD_DAYS}d returns by score decile.
 
     Handles:
@@ -527,7 +2432,14 @@ def compute_decile_returns(all_data, rebalance_dates, score_type="direction_scor
     decile_results = []
     
     for rebalance_date in rebalance_dates:
-        snapshot = _cross_sectional_snapshot(all_data, rebalance_date, score_type)
+        snapshot = _cross_sectional_snapshot(
+            all_data,
+            rebalance_date,
+            score_type,
+            require_exact_dates=True,
+            selected_only=False,
+            membership_lookup=membership_lookup,
+        )
         if len(snapshot) < 10:
             continue
 
@@ -665,113 +2577,16 @@ def plot_decile_monotonicity(decile_df):
 # Output
 # ----------------------------
 
-def save_portfolio_selections(all_data, rebalance_dates, output_dir, score_type="direction_score"):
-    """Save detailed portfolio selections for each rebalance date
-    
-    Outputs CSV showing:
-    - rebalance_date (signal date at close)
-    - entry_date / exit_date (actual trade opens)
-    - ticker
-    - position_type (long/short)
-    - score (direction_score or magnitude_score)
-    - entry_price / exit_price (adjusted opens)
-    - realized return (%)
+def save_portfolio_selections(selections_df, output_dir):
+    """Persist executed review-period holdings for dashboard analysis."""
 
-    Only stocks with entry prices above the minimum trade price are included.
-    """
-    
-    selections = []
-    indexed_data = {
-        ticker: df.sort_values("date").set_index("date")
-        for ticker, df in all_data.items()
-    }
-
-    for rebalance_date in rebalance_dates:
-        # Get all scores for this date
-        date_scores = {}
-        trade_windows = {}
-        for ticker, df_indexed in indexed_data.items():
-            row = df_indexed[df_indexed.index == rebalance_date]
-            if not row.empty:
-                score = row[score_type].values[0]
-                trade_window = get_trade_window(
-                    hist=df_indexed,
-                    signal_date=rebalance_date,
-                    holding_days=FORWARD_DAYS,
-                    execution_model=CANONICAL_EXECUTION_MODEL,
-                )
-                if (
-                    pd.notna(score)
-                    and trade_window is not None
-                    and has_min_trade_price(trade_window.entry_price)
-                ):
-                    date_scores[ticker] = score
-                    trade_windows[ticker] = trade_window
-        
-        if len(date_scores) < TOP_N + BOTTOM_N:
-            continue
-        
-        # Rank by score
-        sorted_tickers = sorted(date_scores.keys(), key=lambda t: date_scores[t], reverse=True)
-        
-        # Long positions (top N)
-        for rank_idx in range(TOP_N):
-            ticker = sorted_tickers[rank_idx]
-            trade_window = trade_windows.get(ticker)
-            if trade_window is None:
-                continue
-            entry = trade_window.entry_price
-            exit_p = trade_window.exit_price
-            ret_10d = (exit_p / entry - 1) * 100 if (entry > 0 and exit_p > 0) else np.nan
-            
-            selections.append({
-                "rebalance_date": rebalance_date,
-                "signal_date": trade_window.signal_date,
-                "entry_date": trade_window.entry_date,
-                "exit_date": trade_window.exit_date,
-                "ticker": ticker,
-                "position_type": "LONG",
-                "rank": rank_idx + 1,
-                "score": date_scores[ticker],
-                "entry_price": entry,
-                "exit_price": exit_p,
-                "realized_return_pct": ret_10d,
-                "realized_10d_return_pct": ret_10d,
-            })
-        
-        # Short positions (bottom N)
-        for rank_idx in range(BOTTOM_N):
-            ticker = sorted_tickers[-(rank_idx + 1)]
-            trade_window = trade_windows.get(ticker)
-            if trade_window is None:
-                continue
-            entry = trade_window.entry_price
-            exit_p = trade_window.exit_price
-            # Short P&L: profit when price falls
-            ret_10d = -(exit_p / entry - 1) * 100 if (entry > 0 and exit_p > 0) else np.nan
-            
-            selections.append({
-                "rebalance_date": rebalance_date,
-                "signal_date": trade_window.signal_date,
-                "entry_date": trade_window.entry_date,
-                "exit_date": trade_window.exit_date,
-                "ticker": ticker,
-                "position_type": "SHORT",
-                "rank": rank_idx + 1,
-                "score": date_scores[ticker],
-                "entry_price": entry,
-                "exit_price": exit_p,
-                "realized_return_pct": ret_10d,
-                "realized_10d_return_pct": ret_10d,
-            })
-    
-    df_selections = pd.DataFrame(selections)
+    if selections_df is None:
+        selections_df = pd.DataFrame()
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "portfolio_selections.csv"
-    df_selections.to_csv(csv_path, index=False)
+    selections_df.to_csv(csv_path, index=False)
     print(f"   ✓ Saved: {csv_path}")
-    
-    return df_selections
+    return selections_df
 
 
 def print_summary(metrics, decile_df):
@@ -786,12 +2601,27 @@ def print_summary(metrics, decile_df):
     
     print(f"📊 OVERALL PERFORMANCE:")
     m = metrics["overall"]
-    print(f"   Total Return: {m['total_ret']:+.2f}%")
+    net_return = m.get("net_total_ret", m["total_ret"])
+    print(f"   Net Return: {net_return:+.2f}%")
+    if "gross_total_ret" in m:
+        print(f"   Gross Return: {m['gross_total_ret']:+.2f}%")
+    if "cost_drag_ret_pct" in m:
+        print(f"   Cost Drag: {m['cost_drag_ret_pct']:+.2f}%")
     print(f"   Avg Daily Return: {m['avg_daily_ret']:+.2f} bps")
     print(f"   Sharpe Ratio: {m['sharpe']:.3f}")
     print(f"   Max Drawdown: {m['maxdd']:.2f}%")
     print(f"   Win Rate: {m['win_rate']:.1f}%")
-    print(f"   Trading Days: {m['n_trades']}")
+    if m.get("total_period_days", m["n_trades"]) != m["n_trades"]:
+        print(f"   Period Observations: {m['n_trades']}")
+        print(f"   Approx Trading Days: {m['total_period_days']}")
+    else:
+        print(f"   Trading Days: {m['n_trades']}")
+    if "n_reviews" in m:
+        print(f"   Reviews / Trade Reviews: {m['n_reviews']} / {m['n_trade_reviews']}")
+        print(f"   Review→Trade Rate: {m['review_to_trade_rate']:.1f}%")
+        print(f"   Mean Turnover: {m['turnover_mean']:.3f}")
+        print(f"   Avg Holding Days: {m['avg_holding_days']:.1f}")
+        print(f"   Total Cost: {m['total_cost_bps']:.1f} bps")
     
     # Cross-sectional IC
     if "ic_mean" in metrics["overall"]:
@@ -855,7 +2685,10 @@ def _cagr(cum_series):
     n = len(cum_series)
     if n < 2:
         return 0.0
-    return (float(cum_series.iloc[-1]) ** (252.0 / n) - 1) * 100
+    terminal = float(cum_series.iloc[-1])
+    if not np.isfinite(terminal) or terminal <= 0:
+        return np.nan
+    return (terminal ** (252.0 / n) - 1) * 100
 
 
 def _leg_metrics(daily_bps, spy_aligned=None):
@@ -875,7 +2708,12 @@ def _leg_metrics(daily_bps, spy_aligned=None):
     return {"cagr": cagr, "sharpe": sharpe, "beta": beta, "cum": cum}
 
 
-def compute_ic_series(all_data, rebalance_dates, score_type="direction_score"):
+def compute_ic_series(
+    all_data,
+    rebalance_dates,
+    score_type="direction_score",
+    membership_lookup: RussellMembershipLookup | None = None,
+):
     """Return a pd.Series of per-period cross-sectional Spearman ICs, indexed by date.
 
     For magnitude_score, ICs are computed against absolute forward returns.
@@ -883,7 +2721,14 @@ def compute_ic_series(all_data, rebalance_dates, score_type="direction_score"):
     """
     records = []
     for rd in rebalance_dates:
-        snapshot = _cross_sectional_snapshot(all_data, rd, score_type)
+        snapshot = _cross_sectional_snapshot(
+            all_data,
+            rd,
+            score_type,
+            require_exact_dates=True,
+            selected_only=False,
+            membership_lookup=membership_lookup,
+        )
         if len(snapshot) >= 10:
             ic, _ = spearmanr(snapshot["score"], snapshot["ret"])
             records.append({"date": pd.Timestamp(rd), "ic": float(ic)})
@@ -892,7 +2737,13 @@ def compute_ic_series(all_data, rebalance_dates, score_type="direction_score"):
     return pd.DataFrame(records).set_index("date")["ic"]
 
 
-def compute_regime_signal_decomposition(all_data, pnl_df, rebalance_dates, score_type="direction_score"):
+def compute_regime_signal_decomposition(
+    all_data,
+    pnl_df,
+    rebalance_dates,
+    score_type="direction_score",
+    membership_lookup: RussellMembershipLookup | None = None,
+):
     """Decompose signal quality by market regime.
     
     For each rebalance period, compute:
@@ -916,7 +2767,14 @@ def compute_regime_signal_decomposition(all_data, pnl_df, rebalance_dates, score
     }
     
     for rd in rebalance_dates:
-        snapshot = _cross_sectional_snapshot(all_data, rd, score_type)
+        snapshot = _cross_sectional_snapshot(
+            all_data,
+            rd,
+            score_type,
+            require_exact_dates=True,
+            selected_only=False,
+            membership_lookup=membership_lookup,
+        )
         if len(snapshot) < 10:
             continue
 
@@ -1443,21 +3301,28 @@ def _slide6_cost_sensitivity(pnl_df, output_dir):
         (ax_cagr, cagrs,   "CAGR (%)",     "CAGR vs Transaction Cost"),
     ]:
         _dark_ax(ax)
+        y_arr = np.asarray(np.real_if_close(y_vals), dtype=float)
         for i in range(len(cost_sweep) - 1):
-            seg_col = _GREEN if y_vals[i] > 0 else _RED
-            ax.plot(cost_sweep[i:i + 2], y_vals[i:i + 2], color=seg_col, linewidth=2.5)
-        ax.scatter(cost_sweep, y_vals, color=_BLUE, zorder=5, s=55)
+            segment = y_arr[i:i + 2]
+            if not np.all(np.isfinite(segment)):
+                continue
+            seg_col = _GREEN if segment[0] > 0 else _RED
+            ax.plot(cost_sweep[i:i + 2], segment, color=seg_col, linewidth=2.5)
+        finite_mask = np.isfinite(y_arr)
+        ax.scatter(cost_sweep[finite_mask], y_arr[finite_mask], color=_BLUE, zorder=5, s=55)
         ax.axvline(cur_bps, color=_YELLOW, linewidth=2, linestyle="--",
                    label=f"Current = {cur_bps:.0f} bps")
         ax.axhline(0, color=_MUTED, linewidth=0.8, linestyle="--")
-        ax.fill_between(cost_sweep, y_vals, 0,
-                        where=np.array(y_vals) >= 0, alpha=0.10, color=_GREEN)
-        ax.fill_between(cost_sweep, y_vals, 0,
-                        where=np.array(y_vals) <  0, alpha=0.10, color=_RED)
+        ax.fill_between(cost_sweep, y_arr, 0,
+                        where=finite_mask & (y_arr >= 0), alpha=0.10, color=_GREEN)
+        ax.fill_between(cost_sweep, y_arr, 0,
+                        where=finite_mask & (y_arr <  0), alpha=0.10, color=_RED)
         # Breakeven marker
         for i in range(len(cost_sweep) - 1):
-            if (y_vals[i] >= 0 > y_vals[i + 1]) or (y_vals[i] < 0 <= y_vals[i + 1]):
-                be = float(np.interp(0, [y_vals[i], y_vals[i + 1]],
+            if not np.all(np.isfinite(y_arr[i:i + 2])):
+                continue
+            if (y_arr[i] >= 0 > y_arr[i + 1]) or (y_arr[i] < 0 <= y_arr[i + 1]):
+                be = float(np.interp(0, [y_arr[i], y_arr[i + 1]],
                                         [cost_sweep[i], cost_sweep[i + 1]]))
                 ax.axvline(be, color=_RED, linewidth=1.5, linestyle=":",
                            label=f"Breakeven ≈ {be:.1f} bps")
@@ -1940,16 +3805,12 @@ def _slide9_crisis_decomposition(regime_stats, pnl_df, output_dir):
         
         short_r = stats.get("short_regime_return_pct", np.nan)
         short_c = _GREEN if short_r > 0 else _RED
-        ax_t.text(col_x_legs[1], y, "—", color=_MUTED, fontsize=7,
-                    transform=ax_t.transAxes, va="top")
         ax_t.text(col_x_legs[2], y, f"{short_r:+.1f}" if pd.notna(short_r) else "N/A", color=short_c, fontsize=7, fontweight="bold",
                     transform=ax_t.transAxes, va="top")
 
         long_r = stats.get("long_regime_return_pct", np.nan)
         long_c = _GREEN if long_r > 0 else _RED
         ax_t.text(col_x_legs[1], y, f"{long_r:+.1f}" if pd.notna(long_r) else "N/A", color=long_c, fontsize=7, fontweight="bold",
-                    transform=ax_t.transAxes, va="top")
-        ax_t.text(col_x_legs[2], y, "—", color=_MUTED, fontsize=7,
                     transform=ax_t.transAxes, va="top")
         
         y -= 0.07
@@ -1993,11 +3854,32 @@ def _slide9_crisis_decomposition(regime_stats, pnl_df, output_dir):
     print(f"   ✓ Slide 8: {path}")
 
 
-def plot_output_deck(pnl_df, decile_df, metrics, all_data, rebalance_dates, spy_df, output_dir, score_type="direction_score"):
+def plot_output_deck(
+    pnl_df,
+    decile_df,
+    metrics,
+    all_data,
+    rebalance_dates,
+    spy_df,
+    output_dir,
+    score_type="direction_score",
+    membership_lookup: RussellMembershipLookup | None = None,
+):
     """Generate the 9-slide clean output deck and save PNGs to output_dir."""
     print(f"\n🎨 Generating Output Deck (9 slides) [{score_type}]...")
-    ic_series = compute_ic_series(all_data, rebalance_dates, score_type)
-    regime_stats = compute_regime_signal_decomposition(all_data, pnl_df, rebalance_dates, score_type)
+    ic_series = compute_ic_series(
+        all_data,
+        rebalance_dates,
+        score_type,
+        membership_lookup=membership_lookup,
+    )
+    regime_stats = compute_regime_signal_decomposition(
+        all_data,
+        pnl_df,
+        rebalance_dates,
+        score_type,
+        membership_lookup=membership_lookup,
+    )
     
     _slide1_factor_summary(metrics, all_data, ic_series, output_dir, score_type)
     _slide2_cumulative_performance(pnl_df, output_dir)
@@ -2015,7 +3897,20 @@ def plot_output_deck(pnl_df, decile_df, metrics, all_data, rebalance_dates, spy_
 # Per-Score Backtest Runner
 # ----------------------------
 
-def run_backtest(score_type, all_data, spy_df, regime_map, rebalance_dates, output_dir):
+def run_backtest(
+    score_type,
+    all_data,
+    spy_df,
+    regime_map,
+    rebalance_dates,
+    output_dir,
+    config=None,
+    trading_dates=None,
+    skip_plots=False,
+    candidate_pool_config: CandidatePoolConfig | None = None,
+    membership_lookup: RussellMembershipLookup | None = None,
+    periodic_static: bool = False,
+):
     """Run the full factor backtest pipeline for one score type.
 
     Saves an independent 9-slide deck + CSVs to output_dir/<score_type>/.
@@ -2029,23 +3924,90 @@ def run_backtest(score_type, all_data, spy_df, regime_map, rebalance_dates, outp
     print(f"  Backtest: {score_type.upper().replace('_', ' ')}")
     print(divider)
 
-    pnl_df  = build_factor_portfolio(all_data, spy_df, rebalance_dates, score_type, regime_map)
-    pnl_df, metrics = compute_metrics(pnl_df, regime_map, all_data, rebalance_dates, score_type)
-    decile_df = compute_decile_returns(all_data, rebalance_dates, score_type)
+    portfolio_result = build_factor_portfolio(
+        all_data,
+        spy_df,
+        rebalance_dates,
+        score_type,
+        regime_map,
+        config=config,
+        trading_dates=trading_dates,
+        candidate_pool_config=candidate_pool_config,
+        membership_lookup=membership_lookup,
+        periodic_static=periodic_static,
+    )
+    pnl_df = portfolio_result["pnl_df"]
+    review_log_df = portfolio_result["review_log_df"]
+    trade_log_df = portfolio_result["trade_log_df"]
+    holdings_log_df = portfolio_result["holdings_log_df"]
+    portfolio_selections_df = portfolio_result["portfolio_selections_df"]
+    review_signal_dates = _review_signal_dates(review_log_df)
+
+    pnl_df, metrics = compute_metrics(
+        pnl_df,
+        regime_map,
+        all_data,
+        review_signal_dates,
+        score_type,
+        review_log_df=review_log_df,
+        trade_log_df=trade_log_df,
+        holdings_log_df=holdings_log_df,
+        membership_lookup=membership_lookup,
+    )
+    decile_df = compute_decile_returns(
+        all_data,
+        review_signal_dates,
+        score_type,
+        membership_lookup=membership_lookup,
+    )
 
     print_summary(metrics, decile_df)
 
-    save_portfolio_selections(all_data, rebalance_dates, subdir, score_type)
+    save_portfolio_selections(portfolio_selections_df, subdir)
 
     # CSVs
     pnl_df.to_csv(subdir / "factor_pnl.csv", index=False)
     decile_df.to_csv(subdir / "decile_analysis.csv", index=False)
+    review_log_df.to_csv(subdir / "review_log.csv", index=False)
+    trade_log_df.to_csv(subdir / "trade_log.csv", index=False)
+    holdings_log_df.to_csv(subdir / "holdings_log.csv", index=False)
     print(f"   \u2713 CSVs saved \u2192 {subdir}")
     
-    # 8-slide output deck
-    plot_output_deck(pnl_df, decile_df, metrics, all_data, rebalance_dates, spy_df, subdir, score_type)
+    if skip_plots:
+        print("   ✓ Skipped plots (--skip-plots)")
+    else:
+        # 8-slide output deck
+        plot_output_deck(
+            pnl_df,
+            decile_df,
+            metrics,
+            all_data,
+            review_signal_dates,
+            spy_df,
+            subdir,
+            score_type,
+            membership_lookup=membership_lookup,
+        )
 
     return pnl_df, metrics, decile_df
+
+
+def _pop_flag(argv, flag, cast=str, default=None):
+    if flag not in argv:
+        return default, argv
+    idx = argv.index(flag)
+    if idx + 1 >= len(argv):
+        raise ValueError(f"{flag} requires a value")
+    value = cast(argv[idx + 1])
+    argv = argv[:idx] + argv[idx + 2:]
+    return value, argv
+
+
+def _parse_score_types(value: str) -> list[str]:
+    score_types = [chunk.strip() for chunk in value.split(",") if chunk.strip()]
+    if not score_types:
+        raise ValueError("--score-types requires at least one score type")
+    return score_types
 
 
 def main():
@@ -2067,7 +4029,7 @@ def main():
         # Run 15-day horizon for date range + specific tickers
         python factor_backtest_engine.py 15 2023-01-01 2024-12-31 AAPL MSFT
     """
-    global FORWARD_DAYS, REBALANCE_DAYS, COMPOSITE_SCORES_DIR
+    global FORWARD_DAYS, REBALANCE_DAYS, COMPOSITE_SCORES_DIR, TOP_N, BOTTOM_N, SCORE_TYPES, COST_RATE
     
     # Parse command-line arguments
     forward_days = None
@@ -2075,21 +4037,80 @@ def main():
     end_date = None
     ticker_filter = None
     scores_dir_override = None
+    review_mode = "static"
+    review_days_override = None
+    hysteresis_mode = "none"
+    variant_label = None
+    skip_plots = False
+    long_retain_buffer = 15
+    short_retain_buffer = 10
+    replacement_gap = 5
+    weighting_mode = "equal"
+    cost_bps = COST_RATE * 10000.0
+    periodic_static = False
+    min_weight_delta = None
+    candidate_pool_mode = "raw"
+    candidate_top_n_magnitude_per_side = 60
+    candidate_direction_threshold = 5.0
+    top_n = TOP_N
+    bottom_n = BOTTOM_N
+    score_types = list(SCORE_TYPES)
+    regime_intervals = DEFAULT_REGIME_REVIEW_INTERVALS.copy()
     
     # Extract --scores-dir flag before positional parsing
     argv = list(sys.argv[1:])
-    if '--scores-dir' in argv:
-        sd_idx = argv.index('--scores-dir')
-        if sd_idx + 1 < len(argv):
-            scores_dir_override = argv[sd_idx + 1]
-            argv = argv[:sd_idx] + argv[sd_idx+2:]
-        else:
-            print("❌ --scores-dir requires a path argument")
-            return
+    if "--skip-plots" in argv:
+        skip_plots = True
+        argv = [arg for arg in argv if arg != "--skip-plots"]
+    if "--periodic-static" in argv:
+        periodic_static = True
+        argv = [arg for arg in argv if arg != "--periodic-static"]
+    try:
+        scores_dir_override, argv = _pop_flag(argv, "--scores-dir", str, None)
+        review_mode, argv = _pop_flag(argv, "--review-mode", str, review_mode)
+        review_days_override, argv = _pop_flag(argv, "--review-days", int, review_days_override)
+        hysteresis_mode, argv = _pop_flag(argv, "--hysteresis-mode", str, hysteresis_mode)
+        variant_label, argv = _pop_flag(argv, "--variant-label", str, variant_label)
+        long_retain_buffer, argv = _pop_flag(argv, "--long-retain-buffer", int, long_retain_buffer)
+        short_retain_buffer, argv = _pop_flag(argv, "--short-retain-buffer", int, short_retain_buffer)
+        replacement_gap, argv = _pop_flag(argv, "--replacement-gap", int, replacement_gap)
+        weighting_mode, argv = _pop_flag(argv, "--weighting-mode", str, weighting_mode)
+        cost_bps, argv = _pop_flag(argv, "--cost-bps", float, cost_bps)
+        top_n, argv = _pop_flag(argv, "--top-n", int, top_n)
+        bottom_n, argv = _pop_flag(argv, "--bottom-n", int, bottom_n)
+        score_types, argv = _pop_flag(argv, "--score-types", _parse_score_types, score_types)
+        min_weight_delta, argv = _pop_flag(argv, "--min-weight-delta", float, min_weight_delta)
+        candidate_pool_mode, argv = _pop_flag(argv, "--candidate-pool-mode", str, candidate_pool_mode)
+        candidate_top_n_magnitude_per_side, argv = _pop_flag(
+            argv,
+            "--candidate-top-n-magnitude",
+            int,
+            candidate_top_n_magnitude_per_side,
+        )
+        candidate_direction_threshold, argv = _pop_flag(
+            argv,
+            "--candidate-direction-threshold",
+            float,
+            candidate_direction_threshold,
+        )
+        regime_intervals["normal"], argv = _pop_flag(argv, "--review-normal-days", int, regime_intervals["normal"])
+        regime_intervals["grind_up"], argv = _pop_flag(argv, "--review-grind-up-days", int, regime_intervals["grind_up"])
+        regime_intervals["slow_bleed"], argv = _pop_flag(argv, "--review-slow-bleed-days", int, regime_intervals["slow_bleed"])
+        regime_intervals["squeeze"], argv = _pop_flag(argv, "--review-squeeze-days", int, regime_intervals["squeeze"])
+        regime_intervals["crisis"], argv = _pop_flag(argv, "--review-crisis-days", int, regime_intervals["crisis"])
+        regime_intervals["unknown"], argv = _pop_flag(argv, "--review-unknown-days", int, regime_intervals["unknown"])
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        return
     
     if scores_dir_override:
         COMPOSITE_SCORES_DIR = Path(scores_dir_override)
         print(f"📂 Using custom scores directory: {COMPOSITE_SCORES_DIR}")
+
+    unsupported_args = [arg for arg in argv if str(arg).startswith("-")]
+    if unsupported_args:
+        print(f"❌ Unsupported argument(s): {', '.join(unsupported_args)}")
+        return
     
     argc = len(argv) + 1  # +1 to match original sys.argv indexing
     sys_argv_compat = ['prog'] + argv  # fake argv for index math below
@@ -2125,14 +4146,86 @@ def main():
     
     start_date_ts = pd.Timestamp(start_date) if start_date else None
     end_date_ts = pd.Timestamp(end_date) if end_date else None
+    if review_mode not in {"static", "adaptive"}:
+        print(f"❌ Unsupported review mode: {review_mode}")
+        return
+    if hysteresis_mode not in {"none", "rank_band_symmetric", "rank_band_asymmetric", "replacement_gap", "combined"}:
+        print(f"❌ Unsupported hysteresis mode: {hysteresis_mode}")
+        return
+    if weighting_mode not in {"equal", "rank"}:
+        print(f"❌ Unsupported weighting mode: {weighting_mode}")
+        return
+    if periodic_static and review_mode != "static":
+        print("❌ --periodic-static currently supports --review-mode static only")
+        return
+    if cost_bps < 0:
+        print("❌ --cost-bps must be non-negative")
+        return
+    if top_n <= 0 or bottom_n <= 0:
+        print("❌ --top-n and --bottom-n must be positive")
+        return
+    allowed_score_types = {"direction_score", "magnitude_score"}
+    invalid_score_types = [score_type for score_type in score_types if score_type not in allowed_score_types]
+    if invalid_score_types:
+        print(f"❌ Unsupported score type(s): {', '.join(invalid_score_types)}")
+        return
+    if candidate_pool_mode not in {"raw", "llm_mirror"}:
+        print(f"❌ Unsupported candidate pool mode: {candidate_pool_mode}")
+        return
+    TOP_N = top_n
+    BOTTOM_N = bottom_n
+    SCORE_TYPES = list(score_types)
+    COST_RATE = cost_bps / 10000.0
+    static_review_days = review_days_override if review_days_override is not None else REBALANCE_DAYS
+    if min_weight_delta is None and hysteresis_mode == "combined":
+        min_weight_delta = 0.5 / top_n
+    candidate_pool_config = CandidatePoolConfig(
+        mode=candidate_pool_mode,
+        direction_threshold=candidate_direction_threshold,
+        top_n_magnitude_per_side=candidate_top_n_magnitude_per_side,
+    )
+
+    config = PortfolioConstructionConfig(
+        review_policy=ReviewPolicy(
+            mode=review_mode,
+            static_review_days=static_review_days,
+            regime_intervals=regime_intervals,
+            scheduled_signal_dates=frozenset(),
+        ),
+        hysteresis_policy=HysteresisPolicy(
+            mode=hysteresis_mode,
+            top_n=top_n,
+            bottom_n=bottom_n,
+            long_retain_buffer=long_retain_buffer,
+            short_retain_buffer=short_retain_buffer,
+            replacement_gap=replacement_gap,
+            min_weight_delta=min_weight_delta,
+        ),
+        top_n=top_n,
+        bottom_n=bottom_n,
+        weighting_mode=weighting_mode,
+    )
     
     print(f"\n{'='*80}")
     print(f"FACTOR BACKTEST ENGINE")
-    print(f"Strategy: Top {TOP_N} Long / Bottom {BOTTOM_N} Short, "
-          f"Rebalance Every {REBALANCE_DAYS} Days, Equal Weight")
+    print(f"Strategy: Top {top_n} Long / Bottom {bottom_n} Short, "
+          f"Review Policy {review_mode} / Hysteresis {hysteresis_mode}")
     print(f"Forward Horizon: {FORWARD_DAYS} days")
+    print(f"Review Days: {static_review_days}")
+    if review_mode == "adaptive":
+        print(f"Adaptive Regime Days: {regime_intervals}")
+    if hysteresis_mode != "none":
+        print(
+            "Hysteresis Params: "
+            f"long_buffer={long_retain_buffer}, short_buffer={short_retain_buffer}, "
+            f"replacement_gap={replacement_gap}"
+        )
+    print(f"Candidate Pool: {candidate_pool_config.describe()}")
+    print(f"Weighting Mode: {weighting_mode}")
+    print(f"Transaction Cost: {cost_bps:g} bps one-way")
+    print(f"Periodic Static: {'enabled' if periodic_static else 'disabled'}")
     print(f"Min entry price: > ${MIN_TRADE_PRICE:.2f}")
-    print(f"Score Types: {', '.join(SCORE_TYPES)}")
+    print(f"Score Types: {', '.join(score_types)}")
     if start_date_ts or end_date_ts:
         date_range = f"{start_date_ts or 'start'} to {end_date_ts or 'end'}"
         print(f"Trading Period: {date_range}")
@@ -2149,56 +4242,151 @@ def main():
         return
     
     print(f"\n✓ Loaded {len(all_data)} stocks with full signal history\n")
+    membership_lookup = None
+    if _looks_like_russell_dataset(all_data):
+        try:
+            membership_lookup = load_russell_membership_lookup()
+            print(
+                "✓ Russell membership gating enabled "
+                f"({Path(membership_lookup.path).name})\n"
+            )
+        except Exception as exc:
+            print(f"⚠️  Russell membership gating unavailable: {exc}\n")
 
     # ── Load SPY for regime identification (FULL HISTORY) ────────────────────
     print("\n� Loading SPY data for regime identification...")
     spy_df = load_spy_data()
+    if spy_df is None:
+        print("❌ SPY data unavailable")
+        return
 
     # Shared calendar and regime map (identical for all score types)
-    all_dates, rebalance_dates = get_rebalance_dates(spy_df["date"], REBALANCE_DAYS)
+    all_dates = sorted(pd.to_datetime(spy_df["date"]).unique())
+    trading_dates = _filter_trading_dates(all_dates, start_date_ts, end_date_ts)
+    _, rebalance_dates = get_rebalance_dates(spy_df["date"], static_review_days)
     regime_map = identify_regimes(spy_df)
     
-    # FILTER REBALANCE DATES (trading period only, signals use full history)
     if start_date_ts or end_date_ts:
-        print(f"Filtering trading dates by range...")
-        rebalance_dates_filtered = []
-        for rd in rebalance_dates:
-            rd_ts = pd.Timestamp(rd)
-            if start_date_ts and rd_ts < start_date_ts:
-                continue
-            if end_date_ts and rd_ts > end_date_ts:
-                continue
-            rebalance_dates_filtered.append(rd)
-        rebalance_dates = rebalance_dates_filtered
-        print(f"   {len(rebalance_dates)} rebalance dates in trading period\n")
+        print("Filtering trading dates by range...")
+        rebalance_dates = [
+            pd.Timestamp(rd)
+            for rd in rebalance_dates
+            if (start_date_ts is None or pd.Timestamp(rd) >= start_date_ts)
+            and (end_date_ts is None or pd.Timestamp(rd) <= end_date_ts)
+        ]
+        print(f"   {len(trading_dates)} trading dates in trading period")
+        print(f"   {len(rebalance_dates)} scheduled static review dates in trading period\n")
+
+    config = PortfolioConstructionConfig(
+        review_policy=ReviewPolicy(
+            mode=review_mode,
+            static_review_days=static_review_days,
+            regime_intervals=regime_intervals,
+            scheduled_signal_dates=frozenset(pd.to_datetime(rebalance_dates)),
+        ),
+        hysteresis_policy=config.hysteresis_policy,
+        top_n=top_n,
+        bottom_n=bottom_n,
+        weighting_mode=config.weighting_mode,
+    )
 
     # ── Run independent backtest per score type ────────────────────────────────
     # Create output directory with forward days in the path
     # If using custom scores dir (e.g., LLM), add a label to avoid overwriting deterministic results
-    if scores_dir_override:
+    nonbaseline_policy = (
+        review_mode != "static"
+        or static_review_days != REBALANCE_DAYS
+        or hysteresis_mode != "none"
+    )
+    nondefault_candidate_pool = not candidate_pool_config.is_default()
+
+    if scores_dir_override and not variant_label and not nonbaseline_policy and not nondefault_candidate_pool:
         scores_label = Path(scores_dir_override).name  # e.g., "composite_scores_llm"
         OUTPUT_DIR = OUTPUT_DIR_BASE / f"{scores_label}_{FORWARD_DAYS}d_horizon"
+    elif variant_label:
+        OUTPUT_DIR = OUTPUT_DIR_BASE / variant_label / f"{FORWARD_DAYS}d_horizon"
+    elif nonbaseline_policy or nondefault_candidate_pool:
+        label_parts = []
+        if nonbaseline_policy:
+            label_parts.append(config.variant_label())
+        if nondefault_candidate_pool:
+            label_parts.append(candidate_pool_config.label_suffix())
+        OUTPUT_DIR = OUTPUT_DIR_BASE / "__".join(label_parts) / f"{FORWARD_DAYS}d_horizon"
     else:
         OUTPUT_DIR = OUTPUT_DIR_BASE / f"{FORWARD_DAYS}d_horizon"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    run_manifest = {
+        "forward_days": FORWARD_DAYS,
+        "rebalance_days": REBALANCE_DAYS,
+        "start_date": start_date_ts.strftime("%Y-%m-%d") if start_date_ts is not None else None,
+        "end_date": end_date_ts.strftime("%Y-%m-%d") if end_date_ts is not None else None,
+        "score_types": list(score_types),
+        "top_n": top_n,
+        "bottom_n": bottom_n,
+        "min_trade_price": MIN_TRADE_PRICE,
+        "cost_rate": COST_RATE,
+        "cost_bps": cost_bps,
+        "scores_dir": str(COMPOSITE_SCORES_DIR),
+        "scores_dir_override": str(scores_dir_override) if scores_dir_override else None,
+        "variant_label": variant_label,
+        "output_dir": str(OUTPUT_DIR),
+        "skip_plots": bool(skip_plots),
+        "periodic_static": bool(periodic_static),
+        "ticker_filter": list(ticker_filter) if ticker_filter else [],
+        "review_policy": {
+            "mode": review_mode,
+            "static_review_days": static_review_days,
+            "regime_intervals": {k: int(v) for k, v in regime_intervals.items()},
+        },
+        "hysteresis_policy": {
+            "mode": hysteresis_mode,
+            "long_retain_buffer": long_retain_buffer,
+            "short_retain_buffer": short_retain_buffer,
+            "replacement_gap": replacement_gap,
+            "min_weight_delta": min_weight_delta,
+        },
+        "candidate_pool": {
+            "mode": candidate_pool_config.mode,
+            "direction_threshold": candidate_pool_config.direction_threshold,
+            "top_n_magnitude_per_side": candidate_pool_config.top_n_magnitude_per_side,
+        },
+        "weighting_mode": weighting_mode,
+        "membership_gating_enabled": bool(membership_lookup is not None),
+        "membership_path": membership_lookup.path if membership_lookup is not None else None,
+    }
+    with (OUTPUT_DIR / "run_config.json").open("w", encoding="utf-8") as fh:
+        json.dump(run_manifest, fh, indent=2, sort_keys=True)
+
     results = {}  # {score_type: (pnl_df, metrics)}
 
-    for score_type in SCORE_TYPES:
+    for score_type in score_types:
         pnl_df, metrics, _ = run_backtest(
-            score_type, all_data, spy_df, regime_map, rebalance_dates, OUTPUT_DIR
+            score_type, all_data, spy_df, regime_map, rebalance_dates, OUTPUT_DIR,
+            config=config, trading_dates=trading_dates, skip_plots=skip_plots,
+            candidate_pool_config=candidate_pool_config,
+            membership_lookup=membership_lookup,
+            periodic_static=periodic_static,
         )
         results[score_type] = (pnl_df, metrics)
 
     # ── Cross-factor comparison slide (saved at root output dir) ──────────────
-    print(f"\n🎨 Generating cross-factor comparison slide...")
-    _slide7_comparison(results, spy_df, OUTPUT_DIR)
+    if skip_plots:
+        print("\n🎨 Skipping comparison slide (--skip-plots)")
+    else:
+        print(f"\n🎨 Generating cross-factor comparison slide...")
+        _slide7_comparison(results, spy_df, OUTPUT_DIR)
 
     print(f"\n{'='*80}")
     print("FACTOR BACKTEST COMPLETE")
     print(f"Results saved to: {OUTPUT_DIR}/")
-    for st in SCORE_TYPES:
-        print(f"  └── {st}/  (9-slide deck + CSVs)")
-    print(f"  └── slide_07_comparison.png")
+    for st in score_types:
+        if skip_plots:
+            print(f"  └── {st}/  (CSVs only)")
+        else:
+            print(f"  └── {st}/  (9-slide deck + CSVs)")
+    if not skip_plots:
+        print(f"  └── slide_07_comparison.png")
     print(f"{'='*80}\n")
 
 

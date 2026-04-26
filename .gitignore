@@ -45,3 +45,4 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+RusselData/russell_data_loader.parquet

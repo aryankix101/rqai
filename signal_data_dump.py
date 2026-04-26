@@ -17,8 +17,8 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from hit_rate_validator import calculate_forward_return_label
-from technical_indicators_calculator import TechnicalIndicatorCalculator
+from signal_contract import REQUIRED_INDICATORS
+from signal_generation import build_signal_frame_from_history
 
 # ----------------------------
 # Config / Secrets
@@ -54,30 +54,6 @@ def make_retry_session(
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
-
-
-
-REQUIRED_INDICATORS = {
-    "vix_percentile_252d",
-    "vol_percentile_504d",
-    "vix_level",
-    "vol_imbalance_20d",
-    "m2_m1_ratio",
-    "atr_14d_pct",
-    "realized_vol_10d",
-    "vol_adjusted_trend_ma100",
-    "range_pos_55d",
-    "pct_from_52w_high",
-    "range_pct",
-    "autocorr_5d",
-    "mom_3m",
-    "rsi_5d",
-    "vel_10d_over_vol",
-    "days_since_52w_high",
-    "vol_adjusted_trend_ma100_slope",
-    "pct_from_ma100",
-}
-
 
 # ----------------------------
 # Main class
@@ -169,127 +145,11 @@ class SignalDataDumper:
 
     def _build_signal_data(self) -> list:
         """Build indicator + return data for each trading day"""
-        records = []
-
-        # Warmup = 504 days (max rolling window used by any indicator)
         warmup = 504
         print(f"   Starting from index {warmup} (warmup: {warmup} days)")
-
-        first_error_printed = False
-        processed_count = 0
-
-        for idx in range(warmup, len(self.hist)):
-            if (idx - warmup) % 500 == 0 and (idx - warmup) > 0:
-                print(f"   Processing day {idx - warmup}/{len(self.hist) - warmup}...", end="\r")
-
-            date = self.hist.index[idx]
-            hist_subset = self.hist.iloc[: idx + 1]
-
-            try:
-                calc = TechnicalIndicatorCalculator(hist_subset)
-
-                # Collect all indicators
-                all_indicators = {}
-
-                # Calculate all categories
-                mom = calc.calculate_momentum() or {}
-                trend = calc.calculate_trend_indicators() or {}
-                mean_rev = calc.calculate_mean_reversion_indicators() or {}
-                trend_qual = calc.calculate_trend_quality_indicators() or {}
-                range_struct = calc.calculate_range_structure_indicators() or {}
-                vol = calc.calculate_volatility_indicators() or {}
-                vol_liq = calc.calculate_volume_liquidity_indicators() or {}
-                vol_part = calc.calculate_volume_participation_indicators() or {}
-                price_events = calc.calculate_price_events() or {}
-
-                all_indicators.update(mom)
-                all_indicators.update(trend)
-                all_indicators.update(mean_rev)
-                all_indicators.update(trend_qual)
-                all_indicators.update(range_struct)
-                all_indicators.update(vol)
-                all_indicators.update(vol_liq)
-                all_indicators.update(vol_part)
-                all_indicators.update(price_events)
-
-                # Add VIX and term structure
-                vix_indicators = calc.calculate_vix_indicators(date) or {}
-                term_structure = calc.calculate_term_structure_indicators(date) or {}
-                all_indicators.update(vix_indicators)
-                all_indicators.update(term_structure)
-
-                # Forward labels use the canonical convention:
-                # signal at today's close, enter next trading day open,
-                # exit after N holding days at the next open.
-                fwd_1d = calculate_forward_return_label(self.hist, date, 1)
-                fwd_5d = calculate_forward_return_label(self.hist, date, 5)
-                fwd_10d = calculate_forward_return_label(self.hist, date, 10)
-                fwd_20d = calculate_forward_return_label(self.hist, date, 20)
-                fwd_30d = calculate_forward_return_label(self.hist, date, 30)
-                fwd_60d = calculate_forward_return_label(self.hist, date, 60)
-                
-                # Absolute values for magnitude score IC
-                fwd_abs_5d = abs(fwd_5d) if fwd_5d is not None and not np.isnan(fwd_5d) else np.nan
-                fwd_abs_10d = abs(fwd_10d) if fwd_10d is not None and not np.isnan(fwd_10d) else np.nan
-                fwd_abs_20d = abs(fwd_20d) if fwd_20d is not None and not np.isnan(fwd_20d) else np.nan
-                fwd_abs_30d = abs(fwd_30d) if fwd_30d is not None and not np.isnan(fwd_30d) else np.nan
-                fwd_abs_60d = abs(fwd_60d) if fwd_60d is not None and not np.isnan(fwd_60d) else np.nan
-
-                # Get adjusted close and open (or unadjusted if not available)
-                adj_close_col = "Adj_Close" if "Adj_Close" in self.hist.columns and self.hist.loc[date, "Adj_Close"] > 0 else "Close"
-                adj_close = float(self.hist.loc[date, adj_close_col])
-                
-                adj_open_col = "Adj_Open" if "Adj_Open" in self.hist.columns and self.hist.loc[date, "Adj_Open"] > 0 else "Open"
-                adj_open = float(self.hist.loc[date, adj_open_col]) if adj_open_col in self.hist.columns else adj_close
-
-                # Build record
-                record = {
-                    "date": date,
-                    "adj_open": adj_open,
-                    "adj_close": adj_close,
-                    "fwd_1d_ret": fwd_1d,
-                    "fwd_5d_ret": fwd_5d,
-                    "fwd_10d_ret": fwd_10d,
-                    "fwd_20d_ret": fwd_20d,
-                    "fwd_30d_ret": fwd_30d,
-                    "fwd_60d_ret": fwd_60d,
-                    "fwd_abs_5d_ret": fwd_abs_5d,
-                    "fwd_abs_10d_ret": fwd_abs_10d,
-                    "fwd_abs_20d_ret": fwd_abs_20d,
-                    "fwd_abs_30d_ret": fwd_abs_30d,
-                    "fwd_abs_60d_ret": fwd_abs_60d,
-                }
-
-                # Add all indicators with type labels - FILTER TO REQUIRED ONLY
-                for ind_name, ind_value in all_indicators.items():
-                    # Skip indicators not in our required set
-                    if ind_name not in REQUIRED_INDICATORS:
-                        continue
-                    
-                    if ind_value is None or isinstance(ind_value, (bool, np.bool_)):
-                        record[ind_name] = np.nan
-                        continue
-
-                    try:
-                        fval = float(ind_value)
-                        if np.isfinite(fval):
-                            record[ind_name] = fval
-                        else:
-                            record[ind_name] = np.nan
-                    except (ValueError, TypeError):
-                        record[ind_name] = np.nan
-
-                records.append(record)
-                processed_count += 1
-
-            except Exception as e:
-                if not first_error_printed:
-                    print(f"\n    ⚠️  Warning: Error at idx={idx}: {str(e)[:100]}")
-                    first_error_printed = True
-                continue
-
-        print(f"\n   ✓ Processed {processed_count} trading days\n")
-        return records
+        df = build_signal_frame_from_history(self.hist)
+        print(f"   ✓ Processed {len(df)} trading days\n")
+        return df.to_dict("records")
 
     def _save_signals(self, df: pd.DataFrame):
         """Save signals to CSV with only required indicators"""

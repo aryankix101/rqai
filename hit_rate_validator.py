@@ -16,6 +16,7 @@ import pandas as pd
 
 
 CANONICAL_EXECUTION_MODEL = "next_open_to_open_hold"
+CLOSE_TO_CLOSE_EXECUTION_MODEL = "close_to_close_hold"
 
 _OPEN_COL_CANDIDATES = ("Adj_Open", "adj_open", "Open", "open")
 _CLOSE_COL_CANDIDATES = ("Adj_Close", "adj_close", "Close", "close")
@@ -57,6 +58,8 @@ def _resolve_price_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> Opti
 def _canonicalize_execution_model(execution_model: Optional[str]) -> str:
     if execution_model in (None, "", CANONICAL_EXECUTION_MODEL, "next_open_to_open"):
         return CANONICAL_EXECUTION_MODEL
+    if execution_model in {CLOSE_TO_CLOSE_EXECUTION_MODEL, "close_to_close"}:
+        return CLOSE_TO_CLOSE_EXECUTION_MODEL
     if execution_model in {"next_open_to_close", "next_open_to_close_hold"}:
         return execution_model
     raise ValueError(f"Unsupported execution_model: {execution_model}")
@@ -73,6 +76,7 @@ def get_trade_window(
 
     Supported execution models:
     - next_open_to_open_hold: canonical no-lookahead hold
+    - close_to_close_hold: close-only approximation for close-only datasets
     - next_open_to_close: next-day intraday only
     - next_open_to_close_hold: legacy next-open to target-day close
     """
@@ -90,26 +94,39 @@ def get_trade_window(
     if not isinstance(signal_idx, (int, np.integer)):
         return None
 
-    open_col = _resolve_price_column(df, _OPEN_COL_CANDIDATES)
     close_col = _resolve_price_column(df, _CLOSE_COL_CANDIDATES)
-    if open_col is None or close_col is None:
+    open_col = _resolve_price_column(df, _OPEN_COL_CANDIDATES)
+    if close_col is None:
+        return None
+    if model != CLOSE_TO_CLOSE_EXECUTION_MODEL and open_col is None:
         return None
 
-    entry_idx = signal_idx + 1
+    if model == CLOSE_TO_CLOSE_EXECUTION_MODEL:
+        entry_idx = signal_idx
+        exit_idx = signal_idx + holding_days
+        entry_col = close_col
+        exit_col = close_col
+    else:
+        entry_idx = signal_idx + 1
+        entry_col = open_col
+
     if model == "next_open_to_close":
         exit_idx = entry_idx
         exit_col = close_col
     elif model == "next_open_to_close_hold":
         exit_idx = signal_idx + holding_days
         exit_col = close_col
-    else:
+    elif model == CANONICAL_EXECUTION_MODEL:
         exit_idx = signal_idx + holding_days + 1
         exit_col = open_col
+    else:
+        exit_idx = signal_idx + holding_days
+        exit_col = close_col
 
     if entry_idx >= len(df) or exit_idx >= len(df):
         return None
 
-    entry_price = df.iloc[entry_idx][open_col]
+    entry_price = df.iloc[entry_idx][entry_col]
     exit_price = df.iloc[exit_idx][exit_col]
 
     if (

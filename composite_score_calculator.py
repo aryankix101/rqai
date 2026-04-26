@@ -3,6 +3,7 @@ Composite Score Calculator — Aggregate direction + magnitude scores
 Using percentile normalization, sign correction, and weighted aggregation
 """
 
+import argparse
 import sys
 import json
 import numpy as np
@@ -13,6 +14,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.dates as mdates
 import warnings
+
+from data_source_config import DEFAULT_COMPOSITE_SCORES_DIR, RUSSELL_SIGNAL_DATA_DIR
 
 warnings.filterwarnings("ignore")
 sns.set_style("darkgrid")
@@ -112,15 +115,19 @@ MAGNITUDE_WEIGHTS = {
 class CompositeScoreCalculator:
     """Calculate direction and magnitude composite scores."""
 
-    def __init__(self, data_path: str):
+    def __init__(self, data_path: str, output_dir: str | Path | None = None, skip_plots: bool = False):
         self.data_path = data_path
+        self.output_dir = Path(output_dir) if output_dir else DEFAULT_COMPOSITE_SCORES_DIR
+        self.skip_plots = skip_plots
         self.df = None
         # Extract ticker from filename for organizing charts
         self.ticker = self._extract_ticker_from_path(data_path)
     
     def _extract_ticker_from_path(self, path: str) -> str:
         """Extract ticker symbol from file path"""
-        # Expected format: signal_data_dump_TICKER_YYYY-MM-DD_YYYY-MM-DD.csv
+        # Expected formats:
+        # - signal_data_dump_TICKER_YYYY-MM-DD_YYYY-MM-DD.csv
+        # - russell_signal_dump_TICKER_YYYY-MM-DD_YYYY-MM-DD.csv
         import re
         match = re.search(r'_(TSLA|T|AAPL|MSFT|GOOGL|AMZN|META|NVDA|JPM|BAC|SPY|[A-Z]+)_\d{4}-\d{2}-\d{2}', self.data_path)
         if match:
@@ -151,7 +158,7 @@ class CompositeScoreCalculator:
         # Validate required columns
         # Support multiple forward return horizons: 5d, 10d, 20d, 30d, 60d
         forward_horizons = [5, 10, 20, 30, 60]
-        required_fwd_cols = set(["date", "adj_open", "adj_close", "fwd_1d_ret"])
+        required_fwd_cols = set(["date", "adj_close", "fwd_1d_ret"])
         for h in forward_horizons:
             required_fwd_cols.add(f"fwd_{h}d_ret")
             required_fwd_cols.add(f"fwd_abs_{h}d_ret")
@@ -162,9 +169,11 @@ class CompositeScoreCalculator:
             required_cols.update(set(DIRECTION_SIGNS.keys()) | set(MAGNITUDE_SIGNS.keys()))
         missing = required_cols - set(self.df.columns)
         if missing:
-            print(f"   ❌ Missing columns: {missing}")
-            print(f"   ℹ️  Available forward columns: {sorted([c for c in self.df.columns if c.startswith('fwd_')])}")
-            return
+            available_forward_cols = sorted([c for c in self.df.columns if c.startswith('fwd_')])
+            raise ValueError(
+                f"missing required columns {sorted(missing)}; "
+                f"available forward columns: {available_forward_cols}"
+            )
         print(f"   ✓ All required columns present (including forward horizons: {forward_horizons})\n")
 
         # Calculate percentile ranks (504d rolling, expanding) only if needed
@@ -187,8 +196,11 @@ class CompositeScoreCalculator:
         self._compute_rolling_metrics()
 
         # Generate visualizations
-        print("📊 Generating visualizations...")
-        self._create_visualizations()
+        if self.skip_plots:
+            print("📊 Skipping visualizations (--skip-plots)")
+        else:
+            print("📊 Generating visualizations...")
+            self._create_visualizations()
 
         # Save results
         self._save_results()
@@ -564,12 +576,22 @@ class CompositeScoreCalculator:
 
     def _save_results(self):
         """Save results to CSV"""
-        ensure_dir("backtest_results/composite_scores")
+        ensure_dir(str(self.output_dir))
 
         # Select columns to export
         # Include all forward horizons: 5d, 10d, 20d, 30d, 60d
         forward_horizons = [5, 10, 20, 30, 60]
-        base_cols = ["date", "adj_open", "adj_close", "fwd_1d_ret"]
+        metadata_cols = [
+            "date",
+            "ticker",
+            "asset_id",
+            "source_column",
+            "is_historical_suffix",
+            "collision_count",
+            "dataset_label",
+            "dataset_version",
+        ]
+        base_cols = ["adj_close", "fwd_1d_ret"]
         for h in forward_horizons:
             base_cols.append(f"fwd_{h}d_ret")
             base_cols.append(f"fwd_abs_{h}d_ret")
@@ -582,14 +604,16 @@ class CompositeScoreCalculator:
         # Magnitude indicator columns
         mag_ind_cols = sorted([c for c in self.df.columns if c in [f"{ind}_percentile" for ind in MAGNITUDE_SIGNS.keys()]])
 
-        export_cols = base_cols + dir_ind_cols + mag_ind_cols + score_cols
+        export_cols = metadata_cols + base_cols + dir_ind_cols + mag_ind_cols + score_cols
 
         df_export = self.df[[c for c in export_cols if c in self.df.columns]]
 
-        # Construct output path: backtest_results/composite_scores/composite_scores_{TICKER}_{START}_{END}.csv
         filename = Path(self.data_path).name  # Get filename only
-        output_filename = filename.replace("signal_data_dump", "composite_scores")
-        output_path = f"backtest_results/composite_scores/{output_filename}"
+        if filename.startswith("russell_signal_dump_"):
+            output_filename = filename.replace("russell_signal_dump", "composite_scores")
+        else:
+            output_filename = filename.replace("signal_data_dump", "composite_scores")
+        output_path = self.output_dir / output_filename
         df_export.to_csv(output_path, index=False)
         print(f"✓ Saved: {output_path}")
         print(f"  Included forward horizons: {forward_horizons} days")
@@ -600,19 +624,39 @@ def ensure_dir(path: str) -> None:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python composite_score_calculator.py DATA_PATH")
-        print("Example: python composite_score_calculator.py backtest_results/signal_data_dump_SPY_2000-01-01_2025-12-31.csv")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Compute deterministic composite scores for one signal dump CSV.")
+    parser.add_argument("data_path", help="Input Russell signal dump CSV")
+    parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_COMPOSITE_SCORES_DIR),
+        help=f"Output directory for composite score CSVs (default: {DEFAULT_COMPOSITE_SCORES_DIR})",
+    )
+    parser.add_argument(
+        "--skip-plots",
+        action="store_true",
+        help="Skip per-ticker visualization generation for faster batch runs",
+    )
+    args = parser.parse_args()
 
-    data_path = sys.argv[1]
-
-    if not Path(data_path).exists():
+    data_path = Path(args.data_path)
+    if not data_path.exists():
         print(f"❌ File not found: {data_path}")
+        print(
+            "Example: "
+            f"python composite_score_calculator.py {RUSSELL_SIGNAL_DATA_DIR}/russell_signal_dump_A_1995-01-03_2025-12-31.csv"
+        )
         sys.exit(1)
 
-    calculator = CompositeScoreCalculator(data_path)
-    calculator.run()
+    calculator = CompositeScoreCalculator(
+        str(data_path),
+        output_dir=args.output_dir,
+        skip_plots=args.skip_plots,
+    )
+    try:
+        calculator.run()
+    except Exception as exc:
+        print(f"❌ Composite score calculation failed for {data_path}: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
