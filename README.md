@@ -12,8 +12,8 @@ In plain English:
 4. The system converts those choices into a portfolio and backtests the result.
 
 For the current run setup:
-- The LLM sees the top `100` long candidates and top `100` short candidates.
-- It must choose exactly `50` longs and `50` shorts.
+- The LLM sees the top `100` long candidates and top `100` short candidates.  (for this example config)
+- It must choose exactly `50` longs and `50` shorts. (for this example config)
 - The executed portfolio is equal-weighted.
 - `--log-llm-trace` stores both the LLM input and raw output for auditability.
 
