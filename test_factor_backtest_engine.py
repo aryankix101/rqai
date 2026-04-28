@@ -253,6 +253,37 @@ class StaticPeriodicPathTests(unittest.TestCase):
         self.assertGreater(pnl_df["period_length_days"].max(), 1)
 
 
+class ComputeMetricsTests(unittest.TestCase):
+    def test_compute_metrics_defaults_missing_period_length_days_to_one(self):
+        pnl_df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                "daily_ret_bps": [10.0, -5.0],
+                "gross_daily_ret_bps": [12.0, -3.0],
+                "long_pnl_bps": [7.0, -1.0],
+                "short_pnl_bps": [3.0, -4.0],
+                "num_longs": [30, 30],
+                "num_shorts": [30, 30],
+                "cost_bps_applied": [2.0, 2.0],
+            }
+        )
+        regime_map = {
+            pd.Timestamp("2024-01-02"): "normal",
+            pd.Timestamp("2024-01-03"): "normal",
+        }
+
+        result_df, metrics = fbe.compute_metrics(
+            pnl_df,
+            regime_map=regime_map,
+            all_data={},
+            review_signal_dates=[],
+            score_type="direction_score",
+        )
+
+        self.assertIn("dailyized_ret", result_df.columns)
+        self.assertEqual(metrics["overall"]["total_period_days"], 2)
+
+
 class MainCliTests(unittest.TestCase):
     def test_main_preserves_weighting_mode_in_run_config(self):
         spy_df = pd.DataFrame(
@@ -270,10 +301,15 @@ class MainCliTests(unittest.TestCase):
                 "magnitude_score": [50.0, 55.0, 60.0],
             }
         )
-        seen_weighting_modes = []
+        seen_configs = []
 
         def fake_run_backtest(*args, **kwargs):
-            seen_weighting_modes.append(kwargs["config"].weighting_mode)
+            seen_configs.append(
+                (
+                    kwargs["config"].weighting_mode,
+                    kwargs["config"].book_sizing_mode,
+                )
+            )
             return pd.DataFrame(), {"overall": {}}, pd.DataFrame()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -282,15 +318,29 @@ class MainCliTests(unittest.TestCase):
                 patch.object(fbe, "load_spy_data", return_value=spy_df),
                 patch.object(fbe, "run_backtest", side_effect=fake_run_backtest),
                 patch.object(fbe, "OUTPUT_DIR_BASE", Path(tmpdir)),
-                patch("sys.argv", ["factor_backtest_engine.py", "10", "--weighting-mode", "rank", "--skip-plots"]),
+                patch(
+                    "sys.argv",
+                    [
+                        "factor_backtest_engine.py",
+                        "10",
+                        "--weighting-mode",
+                        "rank",
+                        "--book-sizing-mode",
+                        "decile",
+                        "--skip-plots",
+                    ],
+                ),
             ):
                 fbe.main()
-                manifest_path = Path(tmpdir) / "10d_horizon" / "run_config.json"
+                manifests = list(Path(tmpdir).glob("**/run_config.json"))
+                self.assertEqual(len(manifests), 1)
+                manifest_path = manifests[0]
                 self.assertTrue(manifest_path.exists())
                 manifest = json.loads(manifest_path.read_text())
                 self.assertEqual(manifest["weighting_mode"], "rank")
+                self.assertEqual(manifest["book_sizing_mode"], "decile")
 
-        self.assertEqual(seen_weighting_modes, ["rank", "rank"])
+        self.assertEqual(seen_configs, [("rank", "decile"), ("rank", "decile")])
 
     def test_main_supports_direction_only_and_custom_book_size(self):
         spy_df = pd.DataFrame(

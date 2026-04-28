@@ -26,6 +26,8 @@ DEFAULT_TEMPERATURE = 0.6
 REQUEST_TIMEOUT = 300.0
 PORTFOLIO_REQUEST_TIMEOUT = 300.0  
 MAX_PORTFOLIO_RETRIES = 5
+MIN_POSITIONS_PER_SIDE = 5
+DEFAULT_MAX_POSITIONS_PER_SIDE = 30
 
 # =============================================================================
 # API Configuration (DeepSeek)
@@ -56,6 +58,75 @@ def clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
 
 
+def normalize_target_positions_per_side(target_positions_per_side: Optional[int]) -> Optional[int]:
+    if target_positions_per_side is None:
+        return None
+    target = int(target_positions_per_side)
+    if target < MIN_POSITIONS_PER_SIDE:
+        raise ValueError(
+            f"target_positions_per_side must be >= {MIN_POSITIONS_PER_SIDE}, got {target}"
+        )
+    return target
+
+
+def position_count_rule_text(
+    target_positions_per_side: Optional[int],
+    item_label: str,
+) -> str:
+    target = normalize_target_positions_per_side(target_positions_per_side)
+    if target is None:
+        return (
+            f"Return {MIN_POSITIONS_PER_SIDE}-{DEFAULT_MAX_POSITIONS_PER_SIDE} long {item_label} "
+            f"and {MIN_POSITIONS_PER_SIDE}-{DEFAULT_MAX_POSITIONS_PER_SIDE} short {item_label}"
+        )
+    return f"Return exactly {target} long {item_label} and exactly {target} short {item_label}"
+
+
+def max_positions_per_side(target_positions_per_side: Optional[int]) -> int:
+    target = normalize_target_positions_per_side(target_positions_per_side)
+    if target is None:
+        return DEFAULT_MAX_POSITIONS_PER_SIDE
+    return target
+
+
+def validate_position_counts(
+    long_count: int,
+    short_count: int,
+    target_positions_per_side: Optional[int],
+    stage_label: str,
+) -> None:
+    target = normalize_target_positions_per_side(target_positions_per_side)
+    if target is None:
+        if long_count < MIN_POSITIONS_PER_SIDE or short_count < MIN_POSITIONS_PER_SIDE:
+            raise ValueError(
+                f"Need >={MIN_POSITIONS_PER_SIDE} {stage_label} per side, "
+                f"got {long_count} long / {short_count} short"
+            )
+        if long_count > DEFAULT_MAX_POSITIONS_PER_SIDE or short_count > DEFAULT_MAX_POSITIONS_PER_SIDE:
+            raise ValueError(
+                f"Need <={DEFAULT_MAX_POSITIONS_PER_SIDE} {stage_label} per side, "
+                f"got {long_count} long / {short_count} short"
+            )
+        return
+
+    if long_count != target or short_count != target:
+        raise ValueError(
+            f"Need exactly {target} {stage_label} per side, "
+            f"got {long_count} long / {short_count} short"
+        )
+
+
+def _entry_weight(entry: dict, field: str) -> float:
+    fallback = entry.get("weight_exec", entry.get("weight", 0.0))
+    if field == "weight_raw":
+        fallback = entry.get("weight_exec", fallback)
+    try:
+        value = float(entry.get(field, fallback))
+    except (TypeError, ValueError):
+        value = 0.0
+    return max(value, 0.0)
+
+
 def validate_and_deduplicate_portfolio(
     long_basket: list,
     short_basket: list,
@@ -69,8 +140,8 @@ def validate_and_deduplicate_portfolio(
     - Rebuild final weights after deduplication
 
     Args:
-        long_basket: [{ticker, weight, rationale}, ...]
-        short_basket: [{ticker, weight, rationale}, ...]
+        long_basket: [{ticker, weight_exec, weight_raw, rationale}, ...]
+        short_basket: [{ticker, weight_exec, weight_raw, rationale}, ...]
         previous_portfolio: Previous portfolio dict (optional, for state validation)
 
     Returns:
@@ -96,16 +167,17 @@ def validate_and_deduplicate_portfolio(
             clean_short.append(pos)
             seen_tickers.add(ticker)
 
-    # Re-normalize weights to sum to 1.0 per leg
-    long_total = sum(p.get("weight", 0) for p in clean_long)
-    short_total = sum(p.get("weight", 0) for p in clean_short)
+    # Re-normalize execution and raw weights separately after deduplication.
+    for entries in (clean_long, clean_short):
+        exec_total = sum(_entry_weight(entry, "weight_exec") for entry in entries)
+        raw_total = sum(_entry_weight(entry, "weight_raw") for entry in entries)
 
-    if long_total > 0:
-        for p in clean_long:
-            p["weight"] = p.get("weight", 0) / long_total
-    if short_total > 0:
-        for p in clean_short:
-            p["weight"] = p.get("weight", 0) / short_total
+        if exec_total > 0:
+            for entry in entries:
+                entry["weight_exec"] = _entry_weight(entry, "weight_exec") / exec_total
+        if raw_total > 0:
+            for entry in entries:
+                entry["weight_raw"] = _entry_weight(entry, "weight_raw") / raw_total
 
     return clean_long, clean_short
 
@@ -299,8 +371,8 @@ OVERLAY_STAGE_OUTPUT_SCHEMA = {
 }
 
 PORTFOLIO_OUTPUT_SCHEMA = {
-    "long_basket": [{"ticker": "str", "weight": "float [0,1]", "rationale": "str"}],
-    "short_basket": [{"ticker": "str", "weight": "float [0,1]", "rationale": "str"}],
+    "long_basket": [{"ticker": "str", "weight_raw": "float [0,1]", "weight_exec": "float [0,1]", "rationale": "str"}],
+    "short_basket": [{"ticker": "str", "weight_raw": "float [0,1]", "weight_exec": "float [0,1]", "rationale": "str"}],
     "kept_from_previous": ["str"],
     "dropped_from_previous": ["str"],
     "reasoning": "str",
@@ -418,6 +490,7 @@ async def _call_llm_json_with_validation(
     retry_instruction: str,
     stage_label: str,
     validate_output: Callable[[dict], dict],
+    capture_trace: bool = False,
 ) -> dict:
     """Call the LLM, parse JSON, validate the stage-specific contract, and retry if needed."""
     payload = {
@@ -452,7 +525,6 @@ async def _call_llm_json_with_validation(
 
             prompt_chars = sum(len(str(message.get("content", ""))) for message in payload["messages"])
             completion_chars = len(content)
-            cleaned_output["raw_llm_response"] = raw_output
             cleaned_output["llm_usage"] = {
                 "attempt_used": attempt + 1,
                 "provider_usage": provider_usage if isinstance(provider_usage, dict) else {},
@@ -462,6 +534,11 @@ async def _call_llm_json_with_validation(
                 "approx_completion_tokens": (completion_chars + 3) // 4,
                 "approx_total_tokens": (prompt_chars + completion_chars + 3) // 4,
             }
+            if capture_trace:
+                cleaned_output["llm_trace"] = {
+                    "messages": list(payload["messages"]),
+                    "raw_output": raw_output,
+                }
             return cleaned_output
 
         except (json.JSONDecodeError, KeyError, IndexError, ValueError) as e:
@@ -535,6 +612,7 @@ def _format_universe_for_prompt(
     regime: str = "unknown",
     rebalance_id: str = "w_00001",
     top_n_magnitude: int = 60,
+    target_positions_per_side: Optional[int] = None,
     turnover_aware: bool = False,
     loss_memory_context: str = "",
 ) -> str:
@@ -548,6 +626,7 @@ def _format_universe_for_prompt(
         regime: Current market regime string
         rebalance_id: Opaque date identifier
         top_n_magnitude: How many top-magnitude stocks to show per candidate pool
+        target_positions_per_side: Optional exact book size requested from the LLM
         turnover_aware: If True, note that a stage-2 overlay will handle turnover later
         loss_memory_context: Optional prompt appendix with retrieved failure cases
 
@@ -681,7 +760,7 @@ def _format_universe_for_prompt(
     lines.append("")
 
     lines.append("STAGE-1 CANDIDATE RULES:")
-    lines.append("1. Return 5-30 long candidates and 5-30 short candidates")
+    lines.append(f"1. {position_count_rule_text(target_positions_per_side, 'candidates')}")
     lines.append("2. No cross-leg overlap")
     if turnover_aware:
         lines.append("3. Ignore incumbents here; stage 2 will handle keep-vs-replace decisions")
@@ -689,6 +768,7 @@ def _format_universe_for_prompt(
         lines.append("3. Ignore previous holdings, turnover, and transaction costs")
     lines.append("4. Prefer signal quality over tiny sizing differences")
     lines.append("5. Do not assign weights in this stage")
+    lines.append("6. Keep rationales short fragments, ideally <= 8 words")
 
     return "\n".join(lines)
 
@@ -716,18 +796,25 @@ def _coerce_signal_candidate_list(raw_candidates: Any, valid_tickers: set) -> li
     return cleaned
 
 
-def _validate_signal_stage_output(raw_output: dict, valid_tickers: set) -> dict:
+def _validate_signal_stage_output(
+    raw_output: dict,
+    valid_tickers: set,
+    target_positions_per_side: Optional[int] = None,
+) -> dict:
     long_candidates = _coerce_signal_candidate_list(raw_output.get("long_candidates", []), valid_tickers)
     short_candidates = _coerce_signal_candidate_list(raw_output.get("short_candidates", []), valid_tickers)
     long_candidates, short_candidates = _deduplicate_cross_leg_entries(long_candidates, short_candidates)
 
-    if len(long_candidates) < 5 or len(short_candidates) < 5:
-        raise ValueError(
-            f"Need >=5 signal candidates per side, got {len(long_candidates)} long / {len(short_candidates)} short"
-        )
+    validate_position_counts(
+        len(long_candidates),
+        len(short_candidates),
+        target_positions_per_side,
+        "signal candidates",
+    )
 
-    long_candidates = long_candidates[:30]
-    short_candidates = short_candidates[:30]
+    max_names = max_positions_per_side(target_positions_per_side)
+    long_candidates = long_candidates[:max_names]
+    short_candidates = short_candidates[:max_names]
     for index, candidate in enumerate(long_candidates, start=1):
         candidate["rank"] = index
     for index, candidate in enumerate(short_candidates, start=1):
@@ -761,12 +848,44 @@ def _selection_from_candidates(signal_stage_output: dict) -> dict:
     }
 
 
+def _compact_signal_stage_summary(signal_stage_output: dict) -> dict:
+    def compact_candidates(entries: list) -> list:
+        compact = []
+        for entry in entries:
+            compact.append(
+                {
+                    "ticker": entry.get("ticker"),
+                    "edge_score": entry.get("edge_score"),
+                    "rank": entry.get("rank"),
+                    "rationale": entry.get("rationale", ""),
+                }
+            )
+        return compact
+
+    return {
+        "long_candidates": compact_candidates(signal_stage_output.get("long_candidates", [])),
+        "short_candidates": compact_candidates(signal_stage_output.get("short_candidates", [])),
+        "reasoning": signal_stage_output.get("reasoning", ""),
+        "regime_adjustment": signal_stage_output.get("regime_adjustment", ""),
+    }
+
+
+def _extract_stage_trace(stage_output: Optional[dict]) -> Optional[dict]:
+    if not stage_output:
+        return None
+    trace = stage_output.get("llm_trace")
+    if not trace:
+        return None
+    return dict(trace)
+
+
 def _format_overlay_prompt_context(
     previous_portfolio: dict,
     signal_stage_output: dict,
     universe: dict,
     regime: str,
     rebalance_id: str,
+    target_positions_per_side: Optional[int] = None,
 ) -> str:
     previous_portfolio = previous_portfolio or {}
     current_universe_tickers = set(universe.keys())
@@ -826,15 +945,14 @@ def _format_overlay_prompt_context(
     lines.append("=== ALPHA STAGE LONG CHALLENGERS ===")
     long_candidates = signal_stage_output.get("long_candidates", [])
     if long_candidates:
-        lines.append(f"{'Rank':<5} {'Ticker':<8} {'Edge':>6} {'Util':>8} {'Held':>5}  Rationale")
-        lines.append("-" * 103)
+        lines.append(f"{'Rank':<5} {'Ticker':<8} {'Edge':>6} {'Held':>5}  Rationale")
+        lines.append("-" * 91)
         for entry in long_candidates:
             held_flag = "yes" if entry["ticker"] in prev_longs else "no"
             lines.append(
                 f"{int(entry.get('rank', 0)):<5} "
                 f"{entry['ticker']:<8} "
                 f"{entry.get('edge_score', 0):>6.1f} "
-                f"{entry.get('utility', 0):>8.2f} "
                 f"{held_flag:>5}  "
                 f"{entry.get('rationale', '')}"
             )
@@ -845,15 +963,14 @@ def _format_overlay_prompt_context(
     lines.append("=== ALPHA STAGE SHORT CHALLENGERS ===")
     short_candidates = signal_stage_output.get("short_candidates", [])
     if short_candidates:
-        lines.append(f"{'Rank':<5} {'Ticker':<8} {'Edge':>6} {'Util':>8} {'Held':>5}  Rationale")
-        lines.append("-" * 103)
+        lines.append(f"{'Rank':<5} {'Ticker':<8} {'Edge':>6} {'Held':>5}  Rationale")
+        lines.append("-" * 91)
         for entry in short_candidates:
             held_flag = "yes" if entry["ticker"] in prev_shorts else "no"
             lines.append(
                 f"{int(entry.get('rank', 0)):<5} "
                 f"{entry['ticker']:<8} "
                 f"{entry.get('edge_score', 0):>6.1f} "
-                f"{entry.get('utility', 0):>8.2f} "
                 f"{held_flag:>5}  "
                 f"{entry.get('rationale', '')}"
             )
@@ -862,10 +979,11 @@ def _format_overlay_prompt_context(
     lines.append("")
 
     lines.append("OVERLAY RULES:")
-    lines.append("1. Output the final implemented long and short books only")
+    lines.append(f"1. {position_count_rule_text(target_positions_per_side, 'positions')}")
     lines.append("2. Keep incumbents only when replacement edge is not large enough after costs and uncertainty")
     lines.append("3. Do not assign weights; sizing will be handled by deterministic code")
     lines.append("4. Prefix a rationale with COST_DRIVEN when cost is the main reason to keep a marginal incumbent")
+    lines.append("5. Keep rationales short fragments, ideally <= 8 words")
     return "\n".join(lines)
 
 
@@ -892,19 +1010,23 @@ def _validate_overlay_stage_output(
     raw_output: dict,
     allowed_long_tickers: set,
     allowed_short_tickers: set,
+    target_positions_per_side: Optional[int] = None,
 ) -> dict:
     long_entries = _coerce_overlay_entries(raw_output.get("long_basket", []), allowed_long_tickers)
     short_entries = _coerce_overlay_entries(raw_output.get("short_basket", []), allowed_short_tickers)
     long_entries, short_entries = _deduplicate_cross_leg_entries(long_entries, short_entries)
 
-    if len(long_entries) < 5 or len(short_entries) < 5:
-        raise ValueError(
-            f"Need >=5 overlay selections per side, got {len(long_entries)} long / {len(short_entries)} short"
-        )
+    validate_position_counts(
+        len(long_entries),
+        len(short_entries),
+        target_positions_per_side,
+        "overlay selections",
+    )
 
+    max_names = max_positions_per_side(target_positions_per_side)
     return {
-        "long_basket": long_entries[:30],
-        "short_basket": short_entries[:30],
+        "long_basket": long_entries[:max_names],
+        "short_basket": short_entries[:max_names],
         "reasoning": str(raw_output.get("reasoning", "")).strip(),
         "regime_adjustment": str(raw_output.get("regime_adjustment", "")).strip(),
     }
@@ -945,7 +1067,7 @@ def _build_weighted_side_from_selection(
     exec_weights = [1.0 / len(utilities)] * len(utilities) if use_equal_weight else list(raw_weights)
 
     weighted_entries = []
-    for entry, raw_weight, exec_weight, utility in zip(selected_entries, raw_weights, exec_weights, utilities):
+    for entry, raw_weight, exec_weight, _utility in zip(selected_entries, raw_weights, exec_weights, utilities):
         ticker = entry["ticker"]
         alpha_candidate = candidate_map.get(ticker, {})
         signal = universe.get(ticker, {})
@@ -954,7 +1076,6 @@ def _build_weighted_side_from_selection(
             "ticker": ticker,
             "weight_raw": float(raw_weight),
             "weight_exec": float(exec_weight),
-            "weight": float(exec_weight),
             "rationale": rationale,
             "side": side,
             "direction_score": float(signal.get("direction_score", 0.0)),
@@ -963,7 +1084,6 @@ def _build_weighted_side_from_selection(
             "selection_stage": entry.get("selection_stage", "signal_stage"),
             "alpha_edge_score": alpha_candidate.get("edge_score"),
             "alpha_rank": alpha_candidate.get("rank"),
-            "alpha_utility": float(utility),
         }
         if alpha_candidate.get("rationale"):
             weighted_entry["alpha_rationale"] = str(alpha_candidate.get("rationale", "")).strip()
@@ -980,6 +1100,7 @@ def _build_weighted_portfolio(
     universe: dict,
     previous_portfolio: dict = None,
     use_equal_weight: bool = False,
+    target_positions_per_side: Optional[int] = None,
 ) -> Tuple[list, list]:
     long_basket = _build_weighted_side_from_selection(
         selection.get("long_basket", []),
@@ -998,11 +1119,14 @@ def _build_weighted_portfolio(
         use_equal_weight=use_equal_weight,
     )
     long_basket, short_basket = validate_and_deduplicate_portfolio(long_basket, short_basket, previous_portfolio)
-    if len(long_basket) < 5 or len(short_basket) < 5:
-        raise ValueError(
-            f"Weighted portfolio needs >=5 names per side, got {len(long_basket)} long / {len(short_basket)} short"
-        )
-    return long_basket[:30], short_basket[:30]
+    validate_position_counts(
+        len(long_basket),
+        len(short_basket),
+        target_positions_per_side,
+        "weighted positions",
+    )
+    max_names = max_positions_per_side(target_positions_per_side)
+    return long_basket[:max_names], short_basket[:max_names]
 
 
 async def construct_signal_candidates_from_universe(
@@ -1013,17 +1137,21 @@ async def construct_signal_candidates_from_universe(
     model: str,
     temperature: float,
     top_n_magnitude: int,
+    target_positions_per_side: Optional[int],
     turnover_aware: bool,
     loss_memory_context: str = "",
+    log_llm_trace: bool = False,
 ) -> dict:
     """Stage 1: discover the best current long and short candidate slates."""
     valid_tickers = set(universe.keys())
+    effective_top_n = max(top_n_magnitude, max_positions_per_side(target_positions_per_side))
     universe_text = _format_universe_for_prompt(
         universe=universe,
         previous_portfolio=None,
         regime=regime,
         rebalance_id=rebalance_id,
-        top_n_magnitude=top_n_magnitude,
+        top_n_magnitude=effective_top_n,
+        target_positions_per_side=target_positions_per_side,
         turnover_aware=turnover_aware,
         loss_memory_context=loss_memory_context,
     )
@@ -1033,10 +1161,11 @@ async def construct_signal_candidates_from_universe(
 {universe_text}
 
 RULES:
-- Return 5-30 long candidates and 5-30 short candidates
+- {position_count_rule_text(target_positions_per_side, 'candidates')}
 - Ignore previous holdings, turnover, and transaction costs in this stage
 - Only use tickers from the universe above
 - Do NOT assign weights
+- Keep rationales very short
 - Return ONLY valid JSON matching the signal-stage schema
 """
 
@@ -1047,7 +1176,9 @@ RULES:
     retry_instruction = (
         "Your previous response was invalid. Return ONLY valid JSON with long_candidates "
         "and short_candidates arrays. Each entry needs ticker, edge_score, "
-        "and rationale. Pick 5-30 per side. Do not assign weights."
+        "and rationale. "
+        f"{position_count_rule_text(target_positions_per_side, 'candidates')}. "
+        "Do not assign weights."
     )
 
     return await _call_llm_json_with_validation(
@@ -1057,7 +1188,12 @@ RULES:
         base_messages=base_messages,
         retry_instruction=retry_instruction,
         stage_label="Signal stage",
-        validate_output=lambda raw_output: _validate_signal_stage_output(raw_output, valid_tickers),
+        validate_output=lambda raw_output: _validate_signal_stage_output(
+            raw_output,
+            valid_tickers,
+            target_positions_per_side=target_positions_per_side,
+        ),
+        capture_trace=log_llm_trace,
     )
 
 
@@ -1070,6 +1206,8 @@ async def apply_turnover_overlay_to_portfolio(
     rebalance_id: str,
     model: str,
     temperature: float,
+    target_positions_per_side: Optional[int],
+    log_llm_trace: bool = False,
 ) -> dict:
     """Stage 2: keep-vs-replace overlay using only incumbents plus stage-1 challengers."""
     current_universe_tickers = set(universe.keys())
@@ -1092,6 +1230,7 @@ async def apply_turnover_overlay_to_portfolio(
         universe=universe,
         regime=regime,
         rebalance_id=rebalance_id,
+        target_positions_per_side=target_positions_per_side,
     )
 
     user_content = f"""Apply the turnover-aware overlay and produce the final implemented portfolio.
@@ -1099,7 +1238,7 @@ async def apply_turnover_overlay_to_portfolio(
 {overlay_text}
 
 RULES:
-- Output 5-30 long positions and 5-30 short positions
+- {position_count_rule_text(target_positions_per_side, 'positions')}
 - Only use tickers from the incumbent and challenger pools above
 - No cross-leg overlap
 - Do NOT assign weights; sizing will be handled later by deterministic code
@@ -1113,8 +1252,9 @@ RULES:
     ]
     retry_instruction = (
         "Your previous response was invalid. Return ONLY valid JSON with long_basket "
-        "and short_basket arrays. Each entry needs ticker and rationale. Pick 5-30 "
-        "per side, use only provided tickers, and do not assign weights."
+        "and short_basket arrays. Each entry needs ticker and rationale. "
+        f"{position_count_rule_text(target_positions_per_side, 'positions')}. "
+        "Use only provided tickers, and do not assign weights."
     )
 
     return await _call_llm_json_with_validation(
@@ -1128,7 +1268,9 @@ RULES:
             raw_output,
             allowed_long_tickers,
             allowed_short_tickers,
+            target_positions_per_side=target_positions_per_side,
         ),
+        capture_trace=log_llm_trace,
     )
 
 
@@ -1141,9 +1283,11 @@ async def construct_portfolio_from_universe(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.3,
     top_n_magnitude: int = 60,
+    target_positions_per_side: Optional[int] = None,
     use_equal_weight: bool = False,
     turnover_aware: bool = False,
     loss_memory_context: str = "",
+    log_llm_trace: bool = False,
 ) -> dict:
     """Run the two-stage LLM portfolio pipeline and return the final weighted portfolio."""
 
@@ -1161,8 +1305,10 @@ async def construct_portfolio_from_universe(
             model=model,
             temperature=temperature,
             top_n_magnitude=top_n_magnitude,
+            target_positions_per_side=target_positions_per_side,
             turnover_aware=turnover_aware,
             loss_memory_context=loss_memory_context,
+            log_llm_trace=log_llm_trace,
         )
 
         candidate_lookup = _build_candidate_lookup(signal_stage_output)
@@ -1173,6 +1319,7 @@ async def construct_portfolio_from_universe(
             universe,
             previous_portfolio=previous_portfolio,
             use_equal_weight=use_equal_weight,
+            target_positions_per_side=target_positions_per_side,
         )
 
         overlay_stage_output = None
@@ -1187,6 +1334,8 @@ async def construct_portfolio_from_universe(
                 rebalance_id=rebalance_id,
                 model=model,
                 temperature=temperature,
+                target_positions_per_side=target_positions_per_side,
+                log_llm_trace=log_llm_trace,
             )
             final_selection = {
                 "long_basket": [
@@ -1205,6 +1354,7 @@ async def construct_portfolio_from_universe(
             universe,
             previous_portfolio=previous_portfolio,
             use_equal_weight=use_equal_weight,
+            target_positions_per_side=target_positions_per_side,
         )
 
     kept_from_previous, dropped_from_previous = derive_portfolio_transition(
@@ -1231,10 +1381,7 @@ async def construct_portfolio_from_universe(
     )
 
     execution_mode = "equal_weight" if use_equal_weight else "llm_weighted"
-    signal_stage_summary = {
-        key: signal_stage_output.get(key)
-        for key in ("long_candidates", "short_candidates", "reasoning", "regime_adjustment")
-    }
+    signal_stage_summary = _compact_signal_stage_summary(signal_stage_output)
     overlay_stage_summary = None
     if overlay_stage_output:
         overlay_stage_summary = {
@@ -1242,17 +1389,13 @@ async def construct_portfolio_from_universe(
             for key in ("long_basket", "short_basket", "reasoning", "regime_adjustment")
         }
 
-    return {
+    result = {
         "rebalance_date": rebalance_date,
         "rebalance_id": rebalance_id,
         "regime": regime,
         "pipeline_mode": "two_stage_overlay" if overlay_stage_output else "two_stage_signal_only",
         "long_basket": long_basket,
         "short_basket": short_basket,
-        "preliminary_portfolio": {
-            "long_basket": preliminary_long_basket,
-            "short_basket": preliminary_short_basket,
-        },
         "signal_stage": signal_stage_summary,
         "overlay_stage": overlay_stage_summary,
         "kept_from_previous": kept_from_previous,
@@ -1273,11 +1416,18 @@ async def construct_portfolio_from_universe(
         "execution_mode": execution_mode,
         "max_retries": MAX_PORTFOLIO_RETRIES,
         "llm_usage": llm_usage,
-        "raw_llm_response": {
-            "signal_stage": signal_stage_output.get("raw_llm_response", {}),
-            "overlay_stage": overlay_stage_output.get("raw_llm_response", {}) if overlay_stage_output else {},
-        },
     }
+    if overlay_stage_output:
+        result["preliminary_portfolio"] = {
+            "long_basket": preliminary_long_basket,
+            "short_basket": preliminary_short_basket,
+        }
+    if log_llm_trace:
+        result["llm_trace"] = {
+            "signal_stage": _extract_stage_trace(signal_stage_output),
+            "overlay_stage": _extract_stage_trace(overlay_stage_output),
+        }
+    return result
 
 # =============================================================================
 # CLI Test Interface

@@ -4,6 +4,7 @@ import pandas as pd
 
 from portfolio_policies import (
     HysteresisPolicy,
+    PortfolioConstructionConfig,
     ReviewPolicy,
     build_target_weights,
     compute_trade_decision,
@@ -39,6 +40,31 @@ class ReviewPolicyTests(unittest.TestCase):
 
 
 class HysteresisPolicyTests(unittest.TestCase):
+    def test_target_book_respects_dynamic_target_sizes(self):
+        policy = HysteresisPolicy(
+            mode="none",
+            top_n=30,
+            bottom_n=30,
+        )
+        long_candidates = [f"L{i}" for i in range(1, 11)]
+        short_candidates = [f"S{i}" for i in range(1, 11)]
+        long_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(long_candidates)}
+        short_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(short_candidates)}
+
+        target_longs, target_shorts = policy.target_book(
+            current_longs=[],
+            current_shorts=[],
+            candidate_longs=long_candidates,
+            candidate_shorts=short_candidates,
+            long_rank_map=long_rank_map,
+            short_rank_map=short_rank_map,
+            target_long_n=2,
+            target_short_n=1,
+        )
+
+        self.assertEqual(target_longs, ["L1", "L2"])
+        self.assertEqual(target_shorts, ["S1"])
+
     def test_long_rank_31_is_retained_with_rank_band(self):
         policy = HysteresisPolicy(
             mode="rank_band_asymmetric",
@@ -171,6 +197,21 @@ class WeightingModeTests(unittest.TestCase):
         self.assertAlmostEqual(weights["S3"], -(1 / 6))
         self.assertAlmostEqual(sum(weight for weight in weights.values() if weight > 0), 1.0)
         self.assertAlmostEqual(sum(weight for weight in weights.values() if weight < 0), -1.0)
+
+
+class PortfolioConstructionConfigTests(unittest.TestCase):
+    def test_decile_book_sizes_match_weekly_mean_reversion_buckets(self):
+        config = PortfolioConstructionConfig(
+            review_policy=ReviewPolicy(mode="static", static_review_days=10),
+            hysteresis_policy=HysteresisPolicy(mode="none", top_n=30, bottom_n=30),
+            top_n=30,
+            bottom_n=30,
+            weighting_mode="equal",
+            book_sizing_mode="decile",
+        )
+
+        self.assertEqual(config.target_book_sizes(856), (86, 85))
+        self.assertEqual(config.target_book_sizes(941), (95, 94))
 
 
 if __name__ == "__main__":

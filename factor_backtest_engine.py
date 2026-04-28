@@ -672,6 +672,13 @@ class CandidatePoolConfig:
     def describe(self) -> str:
         if self.mode == "raw":
             return "raw score ranking across the full tradable universe"
+        if self.mode == "llm_mirror_fill_raw":
+            return (
+                "LLM-mirror pool with raw backfill: "
+                f"dir>|{self.direction_threshold:g}| split, "
+                f"top {self.top_n_magnitude_per_side} by magnitude per side, "
+                "rank within side by the selected score, then raw-fill shortages"
+            )
         return (
             "LLM-mirror pool: "
             f"dir>|{self.direction_threshold:g}| split, "
@@ -996,7 +1003,17 @@ def _candidate_snapshot(
             "short_rank_map": {},
         }
 
-    if candidate_pool_config.mode == "llm_mirror":
+    raw_long_candidates = sorted(
+        date_scores.keys(),
+        key=lambda ticker: (date_scores[ticker]["score"], ticker),
+        reverse=True,
+    )
+    raw_short_candidates = sorted(
+        date_scores.keys(),
+        key=lambda ticker: (date_scores[ticker]["score"], ticker),
+    )
+
+    if candidate_pool_config.mode in {"llm_mirror", "llm_mirror_fill_raw"}:
         threshold = float(candidate_pool_config.direction_threshold)
         top_n_magnitude = int(candidate_pool_config.top_n_magnitude_per_side)
 
@@ -1026,8 +1043,6 @@ def _candidate_snapshot(
             reverse=True,
         )[:top_n_magnitude]
 
-        filtered_tickers = set(long_pool) | set(short_pool)
-        date_scores = {ticker: date_scores[ticker] for ticker in filtered_tickers}
         long_candidates = sorted(
             long_pool,
             key=lambda ticker: (date_scores[ticker]["score"], ticker),
@@ -1037,16 +1052,17 @@ def _candidate_snapshot(
             short_pool,
             key=lambda ticker: (date_scores[ticker]["score"], ticker),
         )
+        if candidate_pool_config.mode == "llm_mirror_fill_raw":
+            long_seen = set(long_candidates)
+            short_seen = set(short_candidates)
+            long_candidates.extend([ticker for ticker in raw_long_candidates if ticker not in long_seen])
+            short_candidates.extend([ticker for ticker in raw_short_candidates if ticker not in short_seen])
+        else:
+            filtered_tickers = set(long_pool) | set(short_pool)
+            date_scores = {ticker: date_scores[ticker] for ticker in filtered_tickers}
     else:
-        long_candidates = sorted(
-            date_scores.keys(),
-            key=lambda ticker: (date_scores[ticker]["score"], ticker),
-            reverse=True,
-        )
-        short_candidates = sorted(
-            date_scores.keys(),
-            key=lambda ticker: (date_scores[ticker]["score"], ticker),
-        )
+        long_candidates = raw_long_candidates
+        short_candidates = raw_short_candidates
 
     long_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(long_candidates)}
     short_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(short_candidates)}
@@ -1072,6 +1088,7 @@ def _summarize_policy_label(config: PortfolioConstructionConfig) -> str:
         f"review={config.review_policy.mode}"
         f", static_days={config.review_policy.static_review_days}"
         f", hysteresis={config.hysteresis_policy.mode}"
+        f", book={config.book_sizing_mode}"
     )
 
 
@@ -1283,8 +1300,7 @@ def _build_factor_portfolio_periodic_static(
     review_snapshots = []
 
     print(f"\n📊 Building factor portfolio...")
-    print(f"   Long leg : Top    {config.top_n}")
-    print(f"   Short leg: Bottom {config.bottom_n}")
+    print(f"   Book sizing: {config.describe_book_sizing()}")
     print(f"   Gross exposure: 2.0x (long-short market-neutral)")
     print(f"   Cost model: {COST_RATE*10000:.0f} bps one-way")
     print(f"   Min entry price: > ${MIN_TRADE_PRICE:.2f}")
@@ -1378,6 +1394,8 @@ def _build_factor_portfolio_periodic_static(
         target_weights_raw = None
         target_longs = []
         target_shorts = []
+        target_long_n = 0
+        target_short_n = 0
         candidate_info = {
             "date_scores": {},
             "long_candidates": [],
@@ -1399,6 +1417,8 @@ def _build_factor_portfolio_periodic_static(
             target_weights_raw = candidate_info["target_weights"]
             target_longs = [ticker for ticker, weight in target_weights_raw.items() if weight > 0]
             target_shorts = [ticker for ticker, weight in target_weights_raw.items() if weight < 0]
+            target_long_n = len(target_longs)
+            target_short_n = len(target_shorts)
         else:
             candidate_info = _candidate_snapshot(
                 score_type,
@@ -1409,7 +1429,12 @@ def _build_factor_portfolio_periodic_static(
                 candidate_pool_config=candidate_pool_config,
                 membership_lookup=membership_lookup,
             )
-            if len(candidate_info["date_scores"]) >= config.top_n + config.bottom_n:
+            target_long_n, target_short_n = config.target_book_sizes(len(candidate_info["date_scores"]))
+            if (
+                target_long_n > 0
+                and target_short_n > 0
+                and len(candidate_info["date_scores"]) >= target_long_n + target_short_n
+            ):
                 current_longs = [ticker for ticker, position in positions.items() if position.weight > 0]
                 current_shorts = [ticker for ticker, position in positions.items() if position.weight < 0]
                 target_longs, target_shorts = config.hysteresis_policy.target_book(
@@ -1419,6 +1444,8 @@ def _build_factor_portfolio_periodic_static(
                     candidate_shorts=candidate_info["short_candidates"],
                     long_rank_map=candidate_info["long_rank_map"],
                     short_rank_map=candidate_info["short_rank_map"],
+                    target_long_n=target_long_n,
+                    target_short_n=target_short_n,
                 )
                 target_weights_raw = build_target_weights(
                     target_longs,
@@ -1434,8 +1461,8 @@ def _build_factor_portfolio_periodic_static(
             review_date=pd.Timestamp(trade_date),
             signal_date=pd.Timestamp(signal_date) if signal_date is not None else None,
             regime=current_regime,
-            candidate_longs=tuple(candidate_info["long_candidates"][:config.top_n]),
-            candidate_shorts=tuple(candidate_info["short_candidates"][:config.bottom_n]),
+            candidate_longs=tuple(candidate_info["long_candidates"][:target_long_n]),
+            candidate_shorts=tuple(candidate_info["short_candidates"][:target_short_n]),
             target_longs=tuple(target_longs),
             target_shorts=tuple(target_shorts),
         )
@@ -1733,6 +1760,7 @@ def build_factor_portfolio(
             top_n=TOP_N,
             bottom_n=BOTTOM_N,
             weighting_mode="equal",
+            book_sizing_mode="fixed",
         )
     elif explicit_llm_mode:
         # Explicit LLM backtests should review on the cached LLM decision dates
@@ -1749,6 +1777,7 @@ def build_factor_portfolio(
             top_n=config.top_n,
             bottom_n=config.bottom_n,
             weighting_mode=config.weighting_mode,
+            book_sizing_mode=config.book_sizing_mode,
         )
 
     if periodic_static:
@@ -1773,8 +1802,7 @@ def build_factor_portfolio(
     review_snapshots = []
 
     print(f"\n📊 Building factor portfolio...")
-    print(f"   Long leg : Top    {config.top_n}")
-    print(f"   Short leg: Bottom {config.bottom_n}")
+    print(f"   Book sizing: {config.describe_book_sizing()}")
     print(f"   Gross exposure: 2.0x (long-short market-neutral)")
     print(f"   Cost model: {COST_RATE*10000:.0f} bps one-way")
     print(f"   Min entry price: > ${MIN_TRADE_PRICE:.2f}")
@@ -1911,6 +1939,8 @@ def build_factor_portfolio(
             target_weights_raw = None
             target_longs = []
             target_shorts = []
+            target_long_n = 0
+            target_short_n = 0
 
             if explicit_llm_mode:
                 candidate_info = _explicit_llm_snapshot(
@@ -1925,6 +1955,8 @@ def build_factor_portfolio(
                 target_weights_raw = candidate_info["target_weights"]
                 target_longs = [ticker for ticker, weight in target_weights_raw.items() if weight > 0]
                 target_shorts = [ticker for ticker, weight in target_weights_raw.items() if weight < 0]
+                target_long_n = len(target_longs)
+                target_short_n = len(target_shorts)
             else:
                 candidate_info = _candidate_snapshot(
                     score_type,
@@ -1935,7 +1967,12 @@ def build_factor_portfolio(
                     candidate_pool_config=candidate_pool_config,
                     membership_lookup=membership_lookup,
                 )
-                if len(candidate_info["date_scores"]) >= config.top_n + config.bottom_n:
+                target_long_n, target_short_n = config.target_book_sizes(len(candidate_info["date_scores"]))
+                if (
+                    target_long_n > 0
+                    and target_short_n > 0
+                    and len(candidate_info["date_scores"]) >= target_long_n + target_short_n
+                ):
                     current_longs = [ticker for ticker, position in positions.items() if position.weight > 0]
                     current_shorts = [ticker for ticker, position in positions.items() if position.weight < 0]
                     target_longs, target_shorts = config.hysteresis_policy.target_book(
@@ -1945,6 +1982,8 @@ def build_factor_portfolio(
                         candidate_shorts=candidate_info["short_candidates"],
                         long_rank_map=candidate_info["long_rank_map"],
                         short_rank_map=candidate_info["short_rank_map"],
+                        target_long_n=target_long_n,
+                        target_short_n=target_short_n,
                     )
                     target_weights_raw = build_target_weights(
                         target_longs,
@@ -1954,14 +1993,14 @@ def build_factor_portfolio(
                 else:
                     review_reason = f"{review_reason}_insufficient_candidates"
 
-                review_decision = ReviewDecision(
+            review_decision = ReviewDecision(
                 due=True,
                 reason=review_reason,
                 review_date=pd.Timestamp(trade_date),
                 signal_date=pd.Timestamp(signal_date) if signal_date is not None else None,
                 regime=current_regime,
-                candidate_longs=tuple(candidate_info["long_candidates"][:config.top_n]),
-                candidate_shorts=tuple(candidate_info["short_candidates"][:config.bottom_n]),
+                candidate_longs=tuple(candidate_info["long_candidates"][:target_long_n]),
+                candidate_shorts=tuple(candidate_info["short_candidates"][:target_short_n]),
                 target_longs=tuple(target_longs),
                 target_shorts=tuple(target_shorts),
             )
@@ -2163,6 +2202,8 @@ def build_factor_portfolio(
             "turnover_total": turnover_total,
             "turnover_long": turnover_long,
             "turnover_short": turnover_short,
+            "period_length_days": 1,
+            "return_granularity": "daily",
         })
         previous_regime = current_regime
 
@@ -2308,11 +2349,17 @@ def compute_metrics(
     - Correct cumulative return calculation
     - Compute cross-sectional IC using the same forward labels as the signal dump
     """
+
+    def _coerce_period_length_series(frame: pd.DataFrame) -> pd.Series:
+        raw = frame.get("period_length_days")
+        if raw is None:
+            return pd.Series(1.0, index=frame.index, dtype=float)
+        return pd.to_numeric(raw, errors="coerce").fillna(1.0).clip(lower=1.0)
     
     # Normalize dates to pd.Timestamp
     pnl_df = pnl_df.copy()
     pnl_df["date"] = pd.to_datetime(pnl_df["date"])
-    period_lengths = pd.to_numeric(pnl_df.get("period_length_days", 1), errors="coerce").fillna(1.0).clip(lower=1.0)
+    period_lengths = _coerce_period_length_series(pnl_df)
     period_returns = pnl_df["daily_ret_bps"] / 10000
     dailyized_returns = pd.Series(
         np.where(
@@ -2398,7 +2445,7 @@ def compute_metrics(
         if len(regime_data) > 10:
             # Compound only the regime's own daily returns (non-contiguous is fine)
             regime_ret = ((1 + regime_data["daily_ret"]).prod() - 1) * 100
-            regime_lengths = pd.to_numeric(regime_data.get("period_length_days", 1), errors="coerce").fillna(1.0).clip(lower=1.0)
+            regime_lengths = _coerce_period_length_series(regime_data)
             regime_factor = 252.0 / float(regime_lengths.mean()) if len(regime_lengths) > 0 else 252.0
             regime_vol = regime_data["daily_ret"].std()
             regime_sharpe = (regime_data["daily_ret"].mean() / regime_vol) * np.sqrt(regime_factor) if regime_vol > 0 else 0
@@ -4046,6 +4093,7 @@ def main():
     short_retain_buffer = 10
     replacement_gap = 5
     weighting_mode = "equal"
+    book_sizing_mode = "fixed"
     cost_bps = COST_RATE * 10000.0
     periodic_static = False
     min_weight_delta = None
@@ -4075,6 +4123,7 @@ def main():
         short_retain_buffer, argv = _pop_flag(argv, "--short-retain-buffer", int, short_retain_buffer)
         replacement_gap, argv = _pop_flag(argv, "--replacement-gap", int, replacement_gap)
         weighting_mode, argv = _pop_flag(argv, "--weighting-mode", str, weighting_mode)
+        book_sizing_mode, argv = _pop_flag(argv, "--book-sizing-mode", str, book_sizing_mode)
         cost_bps, argv = _pop_flag(argv, "--cost-bps", float, cost_bps)
         top_n, argv = _pop_flag(argv, "--top-n", int, top_n)
         bottom_n, argv = _pop_flag(argv, "--bottom-n", int, bottom_n)
@@ -4155,6 +4204,9 @@ def main():
     if weighting_mode not in {"equal", "rank"}:
         print(f"❌ Unsupported weighting mode: {weighting_mode}")
         return
+    if book_sizing_mode not in {"fixed", "decile"}:
+        print(f"❌ Unsupported book sizing mode: {book_sizing_mode}")
+        return
     if periodic_static and review_mode != "static":
         print("❌ --periodic-static currently supports --review-mode static only")
         return
@@ -4169,7 +4221,7 @@ def main():
     if invalid_score_types:
         print(f"❌ Unsupported score type(s): {', '.join(invalid_score_types)}")
         return
-    if candidate_pool_mode not in {"raw", "llm_mirror"}:
+    if candidate_pool_mode not in {"raw", "llm_mirror", "llm_mirror_fill_raw"}:
         print(f"❌ Unsupported candidate pool mode: {candidate_pool_mode}")
         return
     TOP_N = top_n
@@ -4204,12 +4256,16 @@ def main():
         top_n=top_n,
         bottom_n=bottom_n,
         weighting_mode=weighting_mode,
+        book_sizing_mode=book_sizing_mode,
     )
     
     print(f"\n{'='*80}")
     print(f"FACTOR BACKTEST ENGINE")
-    print(f"Strategy: Top {top_n} Long / Bottom {bottom_n} Short, "
-          f"Review Policy {review_mode} / Hysteresis {hysteresis_mode}")
+    if book_sizing_mode == "fixed":
+        strategy_label = f"Top {top_n} Long / Bottom {bottom_n} Short"
+    else:
+        strategy_label = "Top Decile Long / Bottom Decile Short"
+    print(f"Strategy: {strategy_label}, Review Policy {review_mode} / Hysteresis {hysteresis_mode}")
     print(f"Forward Horizon: {FORWARD_DAYS} days")
     print(f"Review Days: {static_review_days}")
     if review_mode == "adaptive":
@@ -4222,6 +4278,7 @@ def main():
         )
     print(f"Candidate Pool: {candidate_pool_config.describe()}")
     print(f"Weighting Mode: {weighting_mode}")
+    print(f"Book Sizing Mode: {book_sizing_mode}")
     print(f"Transaction Cost: {cost_bps:g} bps one-way")
     print(f"Periodic Static: {'enabled' if periodic_static else 'disabled'}")
     print(f"Min entry price: > ${MIN_TRADE_PRICE:.2f}")
@@ -4288,6 +4345,7 @@ def main():
         top_n=top_n,
         bottom_n=bottom_n,
         weighting_mode=config.weighting_mode,
+        book_sizing_mode=config.book_sizing_mode,
     )
 
     # ── Run independent backtest per score type ────────────────────────────────
@@ -4297,6 +4355,7 @@ def main():
         review_mode != "static"
         or static_review_days != REBALANCE_DAYS
         or hysteresis_mode != "none"
+        or book_sizing_mode != "fixed"
     )
     nondefault_candidate_pool = not candidate_pool_config.is_default()
 
@@ -4324,6 +4383,7 @@ def main():
         "score_types": list(score_types),
         "top_n": top_n,
         "bottom_n": bottom_n,
+        "book_sizing_mode": book_sizing_mode,
         "min_trade_price": MIN_TRADE_PRICE,
         "cost_rate": COST_RATE,
         "cost_bps": cost_bps,

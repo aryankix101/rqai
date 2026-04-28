@@ -32,7 +32,7 @@ from data_source_config import DATASET_VERSION, DEFAULT_COMPOSITE_SCORES_DIR, DE
 
 COMPOSITE_SCORES_DIR = DEFAULT_COMPOSITE_SCORES_DIR
 DEFAULT_OUTPUT_DIR = DEFAULT_LLM_COMPOSITE_SCORES_DIR
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 
 # =============================================================================

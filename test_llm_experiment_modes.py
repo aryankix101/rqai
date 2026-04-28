@@ -5,8 +5,12 @@ import pandas as pd
 from data_source_config import DATASET_VERSION
 from llm_ab_comparison import compute_metrics, summarize_backtest_health
 from llm_portfolio_constructor import (
+    COMPOSITE_SCORES_DIR,
+    DEFAULT_LLM_STRATEGY,
+    DEFAULT_MODEL,
     PROMPT_FORMAT_VERSION,
     _cache_is_compatible,
+    _resolve_llm_strategy_module,
     build_cache_filename,
     load_signal_data_preloaded,
     prompt_style_label,
@@ -87,6 +91,36 @@ class PromptModeTests(unittest.TestCase):
             "AAA": pd.DataFrame(
                 [
                     {
+                        "date": pd.Timestamp("2023-12-29"),
+                        "direction_score": 8.0,
+                        "magnitude_score": 70.0,
+                        "adj_close": 20.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-01"),
+                        "direction_score": 9.0,
+                        "magnitude_score": 72.0,
+                        "adj_close": 21.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-02"),
+                        "direction_score": 10.0,
+                        "magnitude_score": 74.0,
+                        "adj_close": 22.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-03"),
+                        "direction_score": 11.0,
+                        "magnitude_score": 76.0,
+                        "adj_close": 23.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-04"),
+                        "direction_score": 11.5,
+                        "magnitude_score": 78.0,
+                        "adj_close": 24.0,
+                    },
+                    {
                         "date": pd.Timestamp("2024-01-05"),
                         "direction_score": 12.0,
                         "magnitude_score": 80.0,
@@ -105,6 +139,36 @@ class PromptModeTests(unittest.TestCase):
             "BBB": pd.DataFrame(
                 [
                     {
+                        "date": pd.Timestamp("2023-12-29"),
+                        "direction_score": -10.0,
+                        "magnitude_score": 65.0,
+                        "adj_close": 35.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-01"),
+                        "direction_score": -11.0,
+                        "magnitude_score": 67.0,
+                        "adj_close": 34.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-02"),
+                        "direction_score": -12.0,
+                        "magnitude_score": 69.0,
+                        "adj_close": 33.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-03"),
+                        "direction_score": -13.0,
+                        "magnitude_score": 71.0,
+                        "adj_close": 32.0,
+                    },
+                    {
+                        "date": pd.Timestamp("2024-01-04"),
+                        "direction_score": -13.5,
+                        "magnitude_score": 73.0,
+                        "adj_close": 31.0,
+                    },
+                    {
                         "date": pd.Timestamp("2024-01-05"),
                         "direction_score": -14.0,
                         "magnitude_score": 75.0,
@@ -118,6 +182,10 @@ class PromptModeTests(unittest.TestCase):
         self.assertAlmostEqual(universe["AAA"]["indicators"]["mom_3m"], 0.731)
         self.assertAlmostEqual(universe["AAA"]["indicators"]["rsi_5d"], 0.612)
         self.assertAlmostEqual(universe["AAA"]["indicators"]["pct_from_ma100"], 0.777)
+        self.assertAlmostEqual(universe["AAA"]["trail_return_5d"], 0.25)
+        self.assertAlmostEqual(universe["AAA"]["mean_reversion_signal"], -0.25)
+        self.assertAlmostEqual(universe["BBB"]["trail_return_5d"], -0.1428571428571429)
+        self.assertAlmostEqual(universe["BBB"]["mean_reversion_signal"], 0.1428571428571429)
 
         prompt_body = _format_universe_for_prompt(
             universe=universe,
@@ -129,6 +197,42 @@ class PromptModeTests(unittest.TestCase):
         self.assertIn("percentile-normalized", prompt_body)
         self.assertIn("0.731", prompt_body)
         self.assertIn("0.654", prompt_body)
+
+    def test_mean_reversion_loader_does_not_require_dir_or_mag_scores(self):
+        composite_dfs = {
+            "AAA": pd.DataFrame(
+                [
+                    {"date": pd.Timestamp("2024-01-01"), "adj_close": 10.0},
+                    {"date": pd.Timestamp("2024-01-02"), "adj_close": 10.5},
+                    {"date": pd.Timestamp("2024-01-03"), "adj_close": 11.0},
+                    {"date": pd.Timestamp("2024-01-04"), "adj_close": 11.5},
+                    {"date": pd.Timestamp("2024-01-05"), "adj_close": 12.0},
+                    {
+                        "date": pd.Timestamp("2024-01-08"),
+                        "adj_close": 9.0,
+                        "mom_3m_percentile": 0.25,
+                    },
+                ]
+            )
+        }
+
+        deterministic_universe = load_signal_data_preloaded(
+            composite_dfs,
+            pd.Timestamp("2024-01-08"),
+            strategy_style="deterministic",
+        )
+        mean_reversion_universe = load_signal_data_preloaded(
+            composite_dfs,
+            pd.Timestamp("2024-01-08"),
+            strategy_style="mean_reversion",
+        )
+
+        self.assertEqual(deterministic_universe, {})
+        self.assertIn("AAA", mean_reversion_universe)
+        self.assertEqual(mean_reversion_universe["AAA"]["direction_score"], 0.0)
+        self.assertEqual(mean_reversion_universe["AAA"]["magnitude_score"], 0.0)
+        self.assertAlmostEqual(mean_reversion_universe["AAA"]["trail_return_5d"], -0.1)
+        self.assertAlmostEqual(mean_reversion_universe["AAA"]["mean_reversion_signal"], 0.1)
 
     def test_deterministic_weight_builder_normalizes_candidate_utilities(self):
         signal_stage_output = {
@@ -165,8 +269,8 @@ class PromptModeTests(unittest.TestCase):
             use_equal_weight=False,
         )
 
-        self.assertAlmostEqual(sum(entry["weight"] for entry in long_basket), 1.0)
-        self.assertAlmostEqual(sum(entry["weight"] for entry in short_basket), 1.0)
+        self.assertAlmostEqual(sum(entry["weight_exec"] for entry in long_basket), 1.0)
+        self.assertAlmostEqual(sum(entry["weight_exec"] for entry in short_basket), 1.0)
         self.assertGreater(long_basket[0]["weight_raw"], long_basket[-1]["weight_raw"])
         self.assertGreater(short_basket[0]["weight_raw"], short_basket[-1]["weight_raw"])
 
@@ -188,16 +292,24 @@ class CacheCompatibilityTests(unittest.TestCase):
     def test_cache_compatibility_requires_matching_prompt_style(self):
         cache = {
             "metadata": {
-                "schema_version": 2,
+                "schema_version": 3,
                 "execution_mode": "equal_weight",
                 "turnover_aware": False,
+                "strategy_style": DEFAULT_LLM_STRATEGY,
+                "model": DEFAULT_MODEL,
+                "temperature": 0.15,
+                "top_n_magnitude": 60,
+                "strategy_signal_source": "technical_composite_v1",
                 "prompt_style": prompt_style_label(False),
                 "prompt_format_version": PROMPT_FORMAT_VERSION,
+                "target_positions_per_side": None,
+                "log_llm_trace": False,
                 "loss_memory_enabled": False,
                 "loss_memory_top_k": 3,
                 "loss_memory_max_targets_per_side": 4,
                 "llm_source_policy": "strict_llm_only",
                 "source_dataset": DATASET_VERSION,
+                "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
             },
             "portfolios": {
                 "2024-01-05": {
@@ -213,9 +325,15 @@ class CacheCompatibilityTests(unittest.TestCase):
                 cache,
                 "equal_weight",
                 turnover_aware=False,
+                strategy_style=DEFAULT_LLM_STRATEGY,
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=60,
+                target_positions_per_side=None,
                 enable_loss_memory=False,
                 loss_memory_top_k=3,
                 loss_memory_max_targets_per_side=4,
+                log_llm_trace=False,
             )
         )
         self.assertFalse(
@@ -223,15 +341,244 @@ class CacheCompatibilityTests(unittest.TestCase):
                 cache,
                 "equal_weight",
                 turnover_aware=True,
+                strategy_style=DEFAULT_LLM_STRATEGY,
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=60,
+                target_positions_per_side=None,
                 enable_loss_memory=False,
                 loss_memory_top_k=3,
                 loss_memory_max_targets_per_side=4,
+                log_llm_trace=False,
             )
         )
         self.assertEqual(
             build_cache_filename("2019-01-01", "2019-12-31", 5, True, False),
-            f"llm_portfolio_2019-01-01_2019-12-31_5d_equal_weight_signal_only_{DATASET_VERSION}.json",
+            f"llm_portfolio_deterministic_2019-01-01_2019-12-31_5d_equal_weight_signal_only_{DATASET_VERSION}.json",
         )
+
+    def test_cache_compatibility_requires_matching_strategy_style(self):
+        cache = {
+            "metadata": {
+                "schema_version": 3,
+                "execution_mode": "equal_weight",
+                "turnover_aware": False,
+                "strategy_style": "mean_reversion",
+                "model": DEFAULT_MODEL,
+                "temperature": 0.15,
+                "top_n_magnitude": 60,
+                "strategy_signal_source": "trail_return_5d_rank_v1",
+                "prompt_style": prompt_style_label(False),
+                "prompt_format_version": PROMPT_FORMAT_VERSION,
+                "target_positions_per_side": None,
+                "log_llm_trace": False,
+                "loss_memory_enabled": False,
+                "loss_memory_top_k": 3,
+                "loss_memory_max_targets_per_side": 4,
+                "llm_source_policy": "strict_llm_only",
+                "source_dataset": DATASET_VERSION,
+                "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+            },
+            "portfolios": {
+                "2024-01-05": {
+                    "llm_source": "llm",
+                    "long_basket": [{"ticker": "AAA", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                    "short_basket": [{"ticker": "BBB", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                }
+            },
+        }
+
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style="deterministic",
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=60,
+                target_positions_per_side=None,
+                enable_loss_memory=False,
+                loss_memory_top_k=3,
+                loss_memory_max_targets_per_side=4,
+                log_llm_trace=False,
+            )
+        )
+
+    def test_cache_compatibility_requires_matching_book_size_and_trace_mode(self):
+        cache = {
+            "metadata": {
+                "schema_version": 3,
+                "execution_mode": "equal_weight",
+                "turnover_aware": False,
+                "strategy_style": DEFAULT_LLM_STRATEGY,
+                "model": DEFAULT_MODEL,
+                "temperature": 0.15,
+                "top_n_magnitude": 60,
+                "strategy_signal_source": "technical_composite_v1",
+                "prompt_style": prompt_style_label(False),
+                "prompt_format_version": PROMPT_FORMAT_VERSION,
+                "target_positions_per_side": 100,
+                "log_llm_trace": True,
+                "loss_memory_enabled": False,
+                "loss_memory_top_k": 3,
+                "loss_memory_max_targets_per_side": 4,
+                "llm_source_policy": "strict_llm_only",
+                "source_dataset": DATASET_VERSION,
+                "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+            },
+            "portfolios": {
+                "2024-01-05": {
+                    "llm_source": "llm",
+                    "long_basket": [{"ticker": "AAA", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                    "short_basket": [{"ticker": "BBB", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                }
+            },
+        }
+
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style=DEFAULT_LLM_STRATEGY,
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=60,
+                target_positions_per_side=None,
+                enable_loss_memory=False,
+                loss_memory_top_k=3,
+                loss_memory_max_targets_per_side=4,
+                log_llm_trace=True,
+            )
+        )
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style=DEFAULT_LLM_STRATEGY,
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=60,
+                target_positions_per_side=100,
+                enable_loss_memory=False,
+                loss_memory_top_k=3,
+                loss_memory_max_targets_per_side=4,
+                log_llm_trace=False,
+            )
+        )
+
+    def test_cache_compatibility_requires_matching_model_temperature_and_topn(self):
+        cache = {
+            "metadata": {
+                "schema_version": 3,
+                "execution_mode": "equal_weight",
+                "turnover_aware": False,
+                "strategy_style": DEFAULT_LLM_STRATEGY,
+                "model": DEFAULT_MODEL,
+                "temperature": 0.15,
+                "top_n_magnitude": 60,
+                "strategy_signal_source": "technical_composite_v1",
+                "prompt_style": prompt_style_label(False),
+                "prompt_format_version": PROMPT_FORMAT_VERSION,
+                "target_positions_per_side": None,
+                "log_llm_trace": False,
+                "loss_memory_enabled": False,
+                "loss_memory_top_k": 3,
+                "loss_memory_max_targets_per_side": 4,
+                "llm_source_policy": "strict_llm_only",
+                "source_dataset": DATASET_VERSION,
+                "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+            },
+            "portfolios": {
+                "2024-01-05": {
+                    "llm_source": "llm",
+                    "long_basket": [{"ticker": "AAA", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                    "short_basket": [{"ticker": "BBB", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                }
+            },
+        }
+
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style=DEFAULT_LLM_STRATEGY,
+                model="different-model",
+                temperature=0.15,
+                top_n_magnitude=60,
+                target_positions_per_side=None,
+                enable_loss_memory=False,
+                loss_memory_top_k=3,
+                loss_memory_max_targets_per_side=4,
+                log_llm_trace=False,
+            )
+        )
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style=DEFAULT_LLM_STRATEGY,
+                model=DEFAULT_MODEL,
+                temperature=0.30,
+                top_n_magnitude=60,
+                target_positions_per_side=None,
+                enable_loss_memory=False,
+                loss_memory_top_k=3,
+                loss_memory_max_targets_per_side=4,
+                log_llm_trace=False,
+            )
+        )
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style=DEFAULT_LLM_STRATEGY,
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=80,
+                target_positions_per_side=None,
+                enable_loss_memory=False,
+                loss_memory_top_k=3,
+                loss_memory_max_targets_per_side=4,
+                log_llm_trace=False,
+            )
+        )
+
+    def test_cache_filename_separates_model_temperature_and_topn_variants(self):
+        baseline = build_cache_filename(
+            "2019-01-01",
+            "2019-12-31",
+            5,
+            True,
+            False,
+            model=DEFAULT_MODEL,
+            temperature=0.15,
+            top_n_magnitude=60,
+        )
+        variant = build_cache_filename(
+            "2019-01-01",
+            "2019-12-31",
+            5,
+            True,
+            False,
+            model="other-model",
+            temperature=0.30,
+            top_n_magnitude=80,
+        )
+
+        self.assertNotEqual(baseline, variant)
+        self.assertIn("mdl-", baseline)
+        self.assertIn("top60", baseline)
+        self.assertIn("temp0p15", baseline)
+
+    def test_strategy_resolver_returns_expected_modules(self):
+        self.assertEqual(_resolve_llm_strategy_module("deterministic").__name__, "technical_llm")
+        self.assertEqual(_resolve_llm_strategy_module("mean_reversion").__name__, "mean_reversion_llm")
 
 
 class ComparisonMetricTests(unittest.TestCase):

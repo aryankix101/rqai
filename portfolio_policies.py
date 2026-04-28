@@ -118,10 +118,14 @@ class HysteresisPolicy:
         candidate_shorts: Sequence[str],
         long_rank_map: Mapping[str, int],
         short_rank_map: Mapping[str, int],
+        target_long_n: int | None = None,
+        target_short_n: int | None = None,
     ) -> Tuple[List[str], List[str]]:
+        long_n = self.top_n if target_long_n is None else int(target_long_n)
+        short_n = self.bottom_n if target_short_n is None else int(target_short_n)
         mode = self.mode
         if mode == "none":
-            return list(candidate_longs[: self.top_n]), list(candidate_shorts[: self.bottom_n])
+            return list(candidate_longs[:long_n]), list(candidate_shorts[:short_n])
 
         use_long_band = mode in {"rank_band_symmetric", "rank_band_asymmetric", "combined"}
         use_short_band = mode in {"rank_band_symmetric", "rank_band_asymmetric", "combined"}
@@ -134,7 +138,7 @@ class HysteresisPolicy:
             current_names=current_longs,
             candidate_names=candidate_longs,
             rank_map=long_rank_map,
-            target_n=self.top_n,
+            target_n=long_n,
             retain_buffer=long_buffer,
             replacement_gap=self.replacement_gap,
             use_rank_band=use_long_band,
@@ -144,7 +148,7 @@ class HysteresisPolicy:
             current_names=current_shorts,
             candidate_names=candidate_shorts,
             rank_map=short_rank_map,
-            target_n=self.bottom_n,
+            target_n=short_n,
             retain_buffer=short_buffer,
             replacement_gap=self.replacement_gap,
             use_rank_band=use_short_band,
@@ -160,6 +164,29 @@ class PortfolioConstructionConfig:
     top_n: int = 30
     bottom_n: int = 30
     weighting_mode: str = "equal"
+    book_sizing_mode: str = "fixed"
+
+    def target_book_sizes(self, candidate_universe_size: int) -> Tuple[int, int]:
+        universe_size = max(0, int(candidate_universe_size))
+        if self.book_sizing_mode == "fixed":
+            return max(0, int(self.top_n)), max(0, int(self.bottom_n))
+        if self.book_sizing_mode == "decile":
+            if universe_size <= 0:
+                return 0, 0
+            # Match the weekly mean-reversion decile bucketing:
+            # long decile gets the highest-ranked ceil(N/10) names,
+            # short decile gets the lowest-ranked floor(N/10) names.
+            long_n = (universe_size + 9) // 10
+            short_n = universe_size - ((9 * universe_size + 9) // 10)
+            return long_n, short_n
+        raise ValueError(f"Unsupported book sizing mode: {self.book_sizing_mode}")
+
+    def describe_book_sizing(self) -> str:
+        if self.book_sizing_mode == "fixed":
+            return f"fixed counts ({self.top_n} long / {self.bottom_n} short)"
+        if self.book_sizing_mode == "decile":
+            return "dynamic deciles (top 10% long / bottom 10% short)"
+        return f"unknown ({self.book_sizing_mode})"
 
     def variant_label(self) -> str:
         label = (
@@ -168,6 +195,8 @@ class PortfolioConstructionConfig:
         )
         if self.weighting_mode != "equal":
             label += f"__weights_{self.weighting_mode}"
+        if self.book_sizing_mode != "fixed":
+            label += f"__book_{self.book_sizing_mode}"
         return label
 
 
