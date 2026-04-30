@@ -8,8 +8,8 @@
 #   3. Run LLM A/B comparison pipeline
 #
 # Usage:
-#   chmod +x run_russell_llm_pipeline.sh
-#   ./run_russell_llm_pipeline.sh 2000-01-01 2025-12-31 10
+#   chmod +x scripts/run_russell_llm_pipeline.sh
+#   ./scripts/run_russell_llm_pipeline.sh 2000-01-01 2025-12-31 10
 #
 # Optional env vars:
 #   DATA_START_DATE=1997-01-01
@@ -23,6 +23,10 @@
 # =============================================================================
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
 
 BACKTEST_START_DATE="${1:-2000-01-01}"
 END_DATE="${2:-2025-12-31}"

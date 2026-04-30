@@ -20,6 +20,7 @@ logger.setLevel(logging.WARNING)  # Suppress INFO logs during sweeps (called tho
 
 # Moving average buffer to reduce regime oscillations
 MA_BUFFER = 0.02
+REFERENCE_DATA_DIR = Path(__file__).resolve().parent / "reference_data"
 
 class TechnicalIndicatorCalculator:
     def __init__(self, hist: pd.DataFrame):
@@ -50,7 +51,7 @@ class TechnicalIndicatorCalculator:
 
         # Load VIX data from FRED VIXCLS.csv for market regime indicators
         self.vix_data = None
-        vix_path = Path(__file__).parent / "VIXCLS.csv"
+        vix_path = REFERENCE_DATA_DIR / "VIXCLS.csv"
         if vix_path.exists():
             try:
                 vix_df = pd.read_csv(vix_path, parse_dates=['observation_date'], index_col='observation_date')
@@ -67,8 +68,8 @@ class TechnicalIndicatorCalculator:
         # Load M1/M2 money supply data from FRED for term structure indicators
         self.m1_data = None
         self.m2_data = None
-        m1_path = Path(__file__).parent / "WM1NS.csv"
-        m2_path = Path(__file__).parent / "WM2NS.csv"
+        m1_path = REFERENCE_DATA_DIR / "WM1NS.csv"
+        m2_path = REFERENCE_DATA_DIR / "WM2NS.csv"
         
         if m1_path.exists():
             try:

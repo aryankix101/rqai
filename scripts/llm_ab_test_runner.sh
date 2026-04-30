@@ -5,13 +5,17 @@
 # Runs a full A/B comparison: Deterministic vs LLM portfolio construction
 #
 # Usage:
-#   chmod +x llm_ab_test_runner.sh
-#   ./llm_ab_test_runner.sh                          # defaults: 2019, 10d horizon
-#   ./llm_ab_test_runner.sh 2017-01-01 2017-12-31    # custom date range
-#   ./llm_ab_test_runner.sh 2019-01-01 2019-12-31 10 # custom date range + horizon
+#   chmod +x scripts/llm_ab_test_runner.sh
+#   ./scripts/llm_ab_test_runner.sh                          # defaults: 2019, 10d horizon
+#   ./scripts/llm_ab_test_runner.sh 2017-01-01 2017-12-31    # custom date range
+#   ./scripts/llm_ab_test_runner.sh 2019-01-01 2019-12-31 10 # custom date range + horizon
 # =============================================================================
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
 
 START_DATE="${1:-2019-01-01}"
 END_DATE="${2:-2019-12-31}"
