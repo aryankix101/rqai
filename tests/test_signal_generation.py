@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 
-from signal_contract import FORWARD_HORIZONS, REQUIRED_INDICATORS
-from signal_generation import MIN_SIGNAL_HISTORY_ROWS, SIGNAL_OUTPUT_COLUMNS, build_signal_frame_from_history
+from deterministic.signal_contract import FORWARD_HORIZONS, REQUIRED_INDICATORS
+from deterministic.signal_generation import MIN_SIGNAL_HISTORY_ROWS, SIGNAL_OUTPUT_COLUMNS, build_signal_frame_from_history
 
 
 def test_build_signal_frame_from_history_emits_composite_contract():

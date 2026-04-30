@@ -46,7 +46,7 @@ if [ "$RUN_STAGE1" = true ]; then
 
     for ticker in "${TICKERS[@]}"; do
         echo "  Processing: $ticker"
-        "$PYTHON_CMD" signal_data_dump.py "$ticker" "$DATA_START_DATE" "$END_DATE" || {
+        "$PYTHON_CMD" -m deterministic.signal_data_dump "$ticker" "$DATA_START_DATE" "$END_DATE" || {
             echo "    Warning: Failed to generate signals for $ticker"
         }
     done
@@ -68,7 +68,7 @@ if [ "$RUN_STAGE2" = true ]; then
         
         if [ -f "$signal_file" ]; then
             echo "  Processing: $ticker"
-            "$PYTHON_CMD" composite_score_calculator.py "$signal_file" || {
+            "$PYTHON_CMD" -m deterministic.composite_score_calculator "$signal_file" || {
                 echo "    Warning: Failed to calculate scores for $ticker"
             }
         else

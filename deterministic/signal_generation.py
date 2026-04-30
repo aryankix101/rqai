@@ -9,9 +9,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hit_rate_validator import CANONICAL_EXECUTION_MODEL, calculate_forward_return_label
-from signal_contract import FORWARD_HORIZONS, REQUIRED_INDICATORS
-from technical_indicators_calculator import TechnicalIndicatorCalculator
+from deterministic.hit_rate_validator import CANONICAL_EXECUTION_MODEL, calculate_forward_return_label
+from deterministic.signal_contract import FORWARD_HORIZONS, REQUIRED_INDICATORS
+from deterministic.technical_indicators_calculator import TechnicalIndicatorCalculator
 
 
 _COLUMN_RENAMES = {

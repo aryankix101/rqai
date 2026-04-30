@@ -8,15 +8,15 @@ from factor_backtest_engine import (
     _is_close_only_dataset,
     _prepare_ticker_data,
 )
-from hit_rate_validator import CLOSE_TO_CLOSE_EXECUTION_MODEL, calculate_forward_return_label
+from deterministic.hit_rate_validator import CLOSE_TO_CLOSE_EXECUTION_MODEL, calculate_forward_return_label
 from portfolio_constraints import filter_symbol_hygiene_frame
-from russell_signal_dump import write_russell_signal_dumps
+from deterministic.russell_signal_dump import write_russell_signal_dumps
 from russell_data_loader import (
     _collapse_wide_ohlcv_histories,
     collapse_to_base_ticker_histories,
     parse_source_column,
 )
-from signal_generation import MIN_SIGNAL_HISTORY_ROWS
+from deterministic.signal_generation import MIN_SIGNAL_HISTORY_ROWS
 
 
 def test_parse_source_column_preserves_suffix_metadata():

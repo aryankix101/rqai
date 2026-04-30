@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-import direction_experiment_analyzer as dea
+from archive.legacy_experiments import direction_experiment_analyzer as dea
 
 
 class DirectionExperimentAnalyzerTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-import det_direction_sweep as dds
+from archive.legacy_experiments import det_direction_sweep as dds
 
 
 class DetDirectionSweepTests(unittest.TestCase):

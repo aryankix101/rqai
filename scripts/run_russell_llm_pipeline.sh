@@ -153,7 +153,7 @@ if [ "${RUN_SIGNAL_DUMP}" = "1" ]; then
 
   TEMP_SIGNAL_DIR="$(make_temp_dir russell_signal_dump)"
 
-  run_cmd "${PYTHON_CMD}" russell_signal_dump.py \
+  run_cmd "${PYTHON_CMD}" -m deterministic.russell_signal_dump \
     --start "${DATA_START_DATE}" \
     --end "${END_DATE}" \
     --output-dir "${TEMP_SIGNAL_DIR}"
@@ -196,7 +196,7 @@ if [ "${RUN_COMPOSITES}" = "1" ]; then
 
   TEMP_COMPOSITE_DIR="$(make_temp_dir composite_scores_russell)"
   COMPOSITE_CALC_CMD=(
-    "${PYTHON_CMD}" composite_score_calculator.py
+    "${PYTHON_CMD}" -m deterministic.composite_score_calculator
     --output-dir "${TEMP_COMPOSITE_DIR}"
   )
   if [ "${SKIP_PLOTS}" = "1" ]; then

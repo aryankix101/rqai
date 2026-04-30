@@ -17,13 +17,13 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from signal_contract import REQUIRED_INDICATORS
-from signal_generation import build_signal_frame_from_history
+from deterministic.signal_contract import REQUIRED_INDICATORS
+from deterministic.signal_generation import build_signal_frame_from_history
 
 # ----------------------------
 # Config / Secrets
 # ----------------------------
-with open("secrets.json", "r") as f:
+with open(Path(__file__).resolve().parent.parent / "secrets.json", "r") as f:
     secrets = json.load(f)
     TIINGO_API_KEY = secrets["TIINGO_API_KEY"]
 
@@ -186,8 +186,8 @@ class SignalDataDumper:
 
 def main():
     if len(sys.argv) < 4:
-        print("Usage: python signal_data_dump.py SYMBOL START_DATE END_DATE")
-        print("Example: python signal_data_dump.py SPY 2000-01-01 2025-12-31")
+        print("Usage: python -m deterministic.signal_data_dump SYMBOL START_DATE END_DATE")
+        print("Example: python -m deterministic.signal_data_dump SPY 2000-01-01 2025-12-31")
         sys.exit(1)
 
     symbol = sys.argv[1]

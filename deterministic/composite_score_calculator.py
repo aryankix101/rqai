@@ -643,7 +643,7 @@ def main():
         print(f"❌ File not found: {data_path}")
         print(
             "Example: "
-            f"python composite_score_calculator.py {RUSSELL_SIGNAL_DATA_DIR}/russell_signal_dump_A_1995-01-03_2025-12-31.csv"
+            f"python -m deterministic.composite_score_calculator {RUSSELL_SIGNAL_DATA_DIR}/russell_signal_dump_A_1995-01-03_2025-12-31.csv"
         )
         sys.exit(1)
 

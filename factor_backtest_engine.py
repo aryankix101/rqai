@@ -21,7 +21,7 @@ from data_source_config import (
     RUSSELL_MEMBERSHIP_PATH,
     SPY_SIGNAL_DATA_PATH,
 )
-from hit_rate_validator import CANONICAL_EXECUTION_MODEL, get_trade_window
+from deterministic.hit_rate_validator import CANONICAL_EXECUTION_MODEL, get_trade_window
 from portfolio_constraints import (
     MIN_TRADE_PRICE,
     filter_symbol_hygiene_frame,

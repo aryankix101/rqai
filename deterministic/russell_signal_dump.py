@@ -3,7 +3,7 @@ Russell OHLCV signal dump builder.
 
 This is the Russell-backed equivalent of the legacy Tiingo `signal_data_dump`
 path and is expected to emit the full indicator contract consumed by
-`composite_score_calculator.py`.
+`deterministic.composite_score_calculator`.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from data_source_config import DATASET_LABEL, DATASET_VERSION, RUSSELL_SIGNAL_DATA_DIR
-from signal_generation import MIN_SIGNAL_HISTORY_ROWS, SIGNAL_OUTPUT_COLUMNS, build_signal_frame_from_history
+from deterministic.signal_generation import MIN_SIGNAL_HISTORY_ROWS, SIGNAL_OUTPUT_COLUMNS, build_signal_frame_from_history
 from russell_data_loader import load_russell_ohlcv_histories
 
 METADATA_COLUMNS = [

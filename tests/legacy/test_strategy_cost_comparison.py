@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-import run_strategy_cost_comparison as scc
+from archive.legacy_experiments import run_strategy_cost_comparison as scc
 
 
 class StrategyCostComparisonTests(unittest.TestCase):
