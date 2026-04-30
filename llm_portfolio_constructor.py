@@ -181,10 +181,11 @@ def load_signal_data_preloaded(
         if ticker in EXCLUDED_TICKERS:
             continue
 
-        row = df[df["date"] == date]
-        if row.empty:
+        row_positions = np.flatnonzero((df["date"] == date).to_numpy())
+        if len(row_positions) == 0:
             continue
-        row = row.iloc[0]
+        row_pos = int(row_positions[0])
+        row = df.iloc[row_pos]
         if not row_has_clean_symbol_metadata(row):
             continue
 
@@ -200,10 +201,9 @@ def load_signal_data_preloaded(
         if not has_min_trade_price(adj_close):
             continue
 
-        row_idx = int(row.name)
         trail_return_5d = np.nan
-        if row_idx >= MEAN_REVERSION_TRAIL_LOOKBACK_DAYS:
-            prior_close = df.iloc[row_idx - MEAN_REVERSION_TRAIL_LOOKBACK_DAYS].get("adj_close", np.nan)
+        if row_pos >= MEAN_REVERSION_TRAIL_LOOKBACK_DAYS:
+            prior_close = df.iloc[row_pos - MEAN_REVERSION_TRAIL_LOOKBACK_DAYS].get("adj_close", np.nan)
             if pd.notna(prior_close) and prior_close > 0 and pd.notna(adj_close) and adj_close > 0:
                 trail_return_5d = float(adj_close / prior_close - 1.0)
 
@@ -278,7 +278,7 @@ def preload_all_data() -> Dict[str, pd.DataFrame]:
             if removed > 0:
                 filtered_rows += removed
                 touched_tickers += 1
-            df = cleaned
+            df = cleaned.reset_index(drop=True)
             if df.empty:
                 continue
             composite_dfs[ticker] = df

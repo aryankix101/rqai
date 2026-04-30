@@ -35,10 +35,13 @@ DEFAULT_END = "2025-12-31"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "backtest_results" / "weekly_mean_reversion_v3"
 DEFAULT_MEMBERSHIP_PATH = RUSSELL_DATA_DIR / "r1000_membership.parquet"
 DEFAULT_COST_BPS_LEVELS = (0.0, 2.5, 5.0, 15.0)
+DEFAULT_CADENCE_MODE = "weekly_friday"
+DEFAULT_SIGNAL_LOOKBACK_DAYS = 5
+DEFAULT_REBALANCE_DAYS = 5
 MIN_TRADE_PRICE = 5.0
 MIN_ADV20_DOLLARS = 5_000_000.0
 MIN_UNIVERSE_SIZE = 50
-WEEKS_PER_YEAR = 52
+DEFAULT_PERIODS_PER_YEAR = 52.0
 SANITY_CHECK_TICKERS = ("AAPL", "LEHMQ")
 
 
@@ -49,9 +52,37 @@ class BenchmarkConfig:
     output_dir: Path
     membership_path: Path
     cost_bps_levels: tuple[float, ...] = DEFAULT_COST_BPS_LEVELS
+    cadence_mode: str = DEFAULT_CADENCE_MODE
+    signal_lookback_days: int = DEFAULT_SIGNAL_LOOKBACK_DAYS
+    rebalance_days: int = DEFAULT_REBALANCE_DAYS
+    holding_days: int | None = None
+    positions_per_side: int | None = None
     min_trade_price: float = MIN_TRADE_PRICE
     min_adv20_dollars: float = MIN_ADV20_DOLLARS
     min_universe_size: int = MIN_UNIVERSE_SIZE
+
+    def resolved_holding_days(self) -> int:
+        return int(self.holding_days) if self.holding_days is not None else int(self.rebalance_days)
+
+    def periods_per_year(self) -> float:
+        if self.cadence_mode == "weekly_friday":
+            return DEFAULT_PERIODS_PER_YEAR
+        return 252.0 / float(max(1, self.resolved_holding_days()))
+
+    def cadence_label(self) -> str:
+        if self.cadence_mode == "weekly_friday":
+            return "weekly Friday"
+        return (
+            f"every {int(self.rebalance_days)} trading days "
+            f"(lookback={int(self.signal_lookback_days)}, hold={self.resolved_holding_days()})"
+        )
+
+    def required_universe_size(self) -> int:
+        if self.positions_per_side is None:
+            return int(self.min_universe_size)
+        if int(self.positions_per_side) <= 0:
+            raise ValueError("positions_per_side must be positive when provided")
+        return max(int(self.min_universe_size), int(self.positions_per_side) * 2)
 
 
 @dataclass(frozen=True)
@@ -109,6 +140,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=parse_cost_bps_levels,
         default=DEFAULT_COST_BPS_LEVELS,
         help="Comma-separated one-way cost levels in bps (default: 0,2.5,5,15)",
+    )
+    parser.add_argument(
+        "--cadence-mode",
+        choices=("weekly_friday", "trading_days"),
+        default=DEFAULT_CADENCE_MODE,
+        help="Signal/rebalance schedule: weekly Friday benchmark or every N trading days",
+    )
+    parser.add_argument(
+        "--signal-lookback-days",
+        type=int,
+        default=DEFAULT_SIGNAL_LOOKBACK_DAYS,
+        help="Trailing trading-day lookback for the reversal signal in trading-day mode (default: 5)",
+    )
+    parser.add_argument(
+        "--rebalance-days",
+        type=int,
+        default=DEFAULT_REBALANCE_DAYS,
+        help="Trading-day rebalance interval in trading-day mode (default: 5)",
+    )
+    parser.add_argument(
+        "--holding-days",
+        type=int,
+        default=None,
+        help="Trading-day holding horizon in trading-day mode (default: same as --rebalance-days)",
+    )
+    parser.add_argument(
+        "--positions-per-side",
+        type=int,
+        default=None,
+        help="Optional fixed equal-weight long/short book size per side instead of full deciles",
     )
     return parser.parse_args(argv)
 
@@ -262,7 +323,7 @@ def available_cost_levels(weekly_returns: pd.DataFrame, prefix: str = "ls_c2c") 
     return tuple(sorted(dict.fromkeys(levels)))
 
 
-def safe_cagr(returns: pd.Series, periods_per_year: int = WEEKS_PER_YEAR) -> float:
+def safe_cagr(returns: pd.Series, periods_per_year: float = DEFAULT_PERIODS_PER_YEAR) -> float:
     clean = returns.dropna()
     if clean.empty:
         return np.nan
@@ -289,16 +350,18 @@ def _next_trading_day_map(trading_dates: pd.DatetimeIndex) -> dict[pd.Timestamp,
     return next_day
 
 
+def _window_return(close_df: pd.DataFrame, start_date: pd.Timestamp, end_date: pd.Timestamp, tickers: list[str]) -> np.ndarray:
+    start_prices = close_df.loc[start_date, tickers].to_numpy(dtype=float)
+    end_prices = close_df.loc[end_date, tickers].to_numpy(dtype=float)
+    return end_prices / start_prices - 1.0
+
+
 def _trailing_week_return(close_df: pd.DataFrame, prev_fri: pd.Timestamp, this_fri: pd.Timestamp, tickers: list[str]) -> np.ndarray:
-    prev_prices = close_df.loc[prev_fri, tickers].to_numpy(dtype=float)
-    this_prices = close_df.loc[this_fri, tickers].to_numpy(dtype=float)
-    return this_prices / prev_prices - 1.0
+    return _window_return(close_df, prev_fri, this_fri, tickers)
 
 
 def _forward_c2c_return(close_df: pd.DataFrame, this_fri: pd.Timestamp, next_fri: pd.Timestamp, tickers: list[str]) -> np.ndarray:
-    this_prices = close_df.loc[this_fri, tickers].to_numpy(dtype=float)
-    next_prices = close_df.loc[next_fri, tickers].to_numpy(dtype=float)
-    return next_prices / this_prices - 1.0
+    return _window_return(close_df, this_fri, next_fri, tickers)
 
 
 def _forward_o2o_return(
@@ -316,6 +379,39 @@ def _forward_o2o_return(
     valid = (~np.isnan(entry_prices)) & (~np.isnan(exit_prices)) & (entry_prices > 0) & (exit_prices > 0)
     values[valid] = exit_prices[valid] / entry_prices[valid] - 1.0
     return values
+
+
+def _rank_signal(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    rank_order = np.argsort(-signal, kind="mergesort")
+    order = np.empty(len(signal), dtype=int)
+    order[rank_order] = np.arange(len(signal))
+    deciles = np.clip((order * 10) // len(signal) + 1, 1, 10)
+    return rank_order, deciles
+
+
+def _select_book_masks(
+    rank_order: np.ndarray,
+    deciles: np.ndarray,
+    asset_count: int,
+    positions_per_side: int | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if positions_per_side is None:
+        return deciles == 1, deciles == 10
+
+    book_size = int(positions_per_side)
+    if book_size <= 0:
+        raise ValueError("positions_per_side must be positive when provided")
+    if asset_count < book_size * 2:
+        raise ValueError(
+            f"Need at least {book_size * 2} assets to build a non-overlapping {book_size}/{book_size} book; "
+            f"got {asset_count}"
+        )
+
+    long_mask = np.zeros(asset_count, dtype=bool)
+    short_mask = np.zeros(asset_count, dtype=bool)
+    long_mask[rank_order[:book_size]] = True
+    short_mask[rank_order[-book_size:]] = True
+    return long_mask, short_mask
 
 
 def run_weekly_strategy(
@@ -374,19 +470,14 @@ def run_weekly_strategy(
 
             valid.append(ticker)
 
-        if len(valid) < config.min_universe_size:
+        if len(valid) < config.required_universe_size():
             continue
 
         trail = _trailing_week_return(close_df, prev_fri, this_fri, valid)
         signal = -trail
 
-        rank_order = np.argsort(-signal, kind="mergesort")
-        order = np.empty(len(valid), dtype=int)
-        order[rank_order] = np.arange(len(valid))
-        deciles = np.clip((order * 10) // len(valid) + 1, 1, 10)
-
-        long_mask = deciles == 1
-        short_mask = deciles == 10
+        rank_order, deciles = _rank_signal(signal)
+        long_mask, short_mask = _select_book_masks(rank_order, deciles, len(valid), config.positions_per_side)
         long_tickers = [valid[pos] for pos in np.where(long_mask)[0]]
         short_tickers = [valid[pos] for pos in np.where(short_mask)[0]]
 
@@ -469,6 +560,155 @@ def run_weekly_strategy(
     return weekly_returns, signal_checks
 
 
+def run_periodic_strategy(
+    market_frames: MarketFrames,
+    membership_lookup: MembershipLookup,
+    config: BenchmarkConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    close_df = market_frames.close_df
+    open_df = market_frames.open_df
+    unadj_close_df = market_frames.unadj_close_df
+    adv20_df = market_frames.dollar_volume_df.rolling(20, min_periods=15).mean()
+
+    trading_dates = close_df.index
+    next_trade_map = _next_trading_day_map(trading_dates)
+    lookback_days = int(config.signal_lookback_days)
+    rebalance_days = int(config.rebalance_days)
+    holding_days = int(config.resolved_holding_days())
+
+    print(f"Trading dates: {len(trading_dates)}")
+    print(
+        "Processing periodic trading-day strategy from "
+        f"{config.start.date()} to {config.end.date()} "
+        f"(lookback={lookback_days}, rebalance={rebalance_days}, hold={holding_days})..."
+    )
+
+    results: list[dict[str, object]] = []
+    signal_rows: list[dict[str, object]] = []
+    prev_long_set: set[str] = set()
+    prev_short_set: set[str] = set()
+
+    max_signal_idx = len(trading_dates) - holding_days - 1
+    for idx in range(lookback_days, max_signal_idx + 1, rebalance_days):
+        start_date = pd.Timestamp(trading_dates[idx - lookback_days])
+        signal_date = pd.Timestamp(trading_dates[idx])
+        exit_date = pd.Timestamp(trading_dates[idx + holding_days])
+
+        if signal_date < config.start:
+            continue
+        if signal_date > config.end or exit_date > config.end:
+            break
+
+        r1000_universe = membership_lookup.universe_on_or_before(signal_date)
+        if not r1000_universe:
+            continue
+
+        valid: list[str] = []
+        for ticker in sorted(r1000_universe):
+            if ticker not in close_df.columns:
+                continue
+            close_prev = close_df.at[start_date, ticker] if start_date in close_df.index else np.nan
+            close_now = close_df.at[signal_date, ticker] if signal_date in close_df.index else np.nan
+            if pd.isna(close_prev) or pd.isna(close_now) or close_prev <= 0 or close_now <= 0:
+                continue
+
+            raw_price = unadj_close_df.at[signal_date, ticker] if signal_date in unadj_close_df.index else np.nan
+            if pd.isna(raw_price) or raw_price < config.min_trade_price:
+                continue
+
+            adv20 = adv20_df.at[signal_date, ticker] if signal_date in adv20_df.index else np.nan
+            if pd.isna(adv20) or adv20 < config.min_adv20_dollars:
+                continue
+
+            valid.append(ticker)
+
+        if len(valid) < config.required_universe_size():
+            continue
+
+        trail = _window_return(close_df, start_date, signal_date, valid)
+        signal = -trail
+
+        rank_order, deciles = _rank_signal(signal)
+        long_mask, short_mask = _select_book_masks(rank_order, deciles, len(valid), config.positions_per_side)
+        long_tickers = [valid[pos] for pos in np.where(long_mask)[0]]
+        short_tickers = [valid[pos] for pos in np.where(short_mask)[0]]
+
+        fwd_c2c = _window_return(close_df, signal_date, exit_date, valid)
+        fwd_o2o = _forward_o2o_return(
+            open_df,
+            next_trade_map.get(signal_date),
+            next_trade_map.get(exit_date),
+            valid,
+        )
+
+        long_ret_c2c = safe_mean(fwd_c2c, long_mask)
+        short_ret_c2c = safe_mean(fwd_c2c, short_mask)
+        long_ret_o2o = safe_mean(fwd_o2o, long_mask)
+        short_ret_o2o = safe_mean(fwd_o2o, short_mask)
+
+        decile_c2c = {}
+        decile_o2o = {}
+        for decile in range(1, 11):
+            decile_mask = deciles == decile
+            decile_c2c[decile] = safe_mean(fwd_c2c, decile_mask)
+            decile_o2o[decile] = safe_mean(fwd_o2o, decile_mask)
+
+        new_long_set = set(long_tickers)
+        new_short_set = set(short_tickers)
+        turnover_long = calc_turnover(prev_long_set, new_long_set)
+        turnover_short = calc_turnover(prev_short_set, new_short_set)
+        prev_long_set = new_long_set
+        prev_short_set = new_short_set
+
+        valid_ic_c2c = (~np.isnan(signal)) & (~np.isnan(fwd_c2c))
+        valid_ic_o2o = (~np.isnan(signal)) & (~np.isnan(fwd_o2o))
+        ic_c2c = stats.spearmanr(signal[valid_ic_c2c], fwd_c2c[valid_ic_c2c])[0] if valid_ic_c2c.sum() > 20 else np.nan
+        ic_o2o = stats.spearmanr(signal[valid_ic_o2o], fwd_o2o[valid_ic_o2o])[0] if valid_ic_o2o.sum() > 20 else np.nan
+
+        row = {
+            "date": signal_date,
+            "n_universe": len(valid),
+            "n_long": len(long_tickers),
+            "n_short": len(short_tickers),
+            "long_ret_c2c": long_ret_c2c,
+            "short_ret_c2c": short_ret_c2c,
+            "long_ret_o2o": long_ret_o2o,
+            "short_ret_o2o": short_ret_o2o,
+            "turnover_long": turnover_long,
+            "turnover_short": turnover_short,
+            "ic_c2c": ic_c2c,
+            "ic_o2o": ic_o2o,
+        }
+        for decile in range(1, 11):
+            row[f"dec_{decile}_c2c"] = decile_c2c[decile]
+            row[f"dec_{decile}_o2o"] = decile_o2o[decile]
+        results.append(row)
+
+        for ticker in SANITY_CHECK_TICKERS:
+            if ticker in valid:
+                pos = valid.index(ticker)
+                signal_rows.append(
+                    {
+                        "date": signal_date,
+                        "ticker": ticker,
+                        "signal": signal[pos],
+                        "trail_ret": trail[pos],
+                        "fwd_c2c": fwd_c2c[pos],
+                        "fwd_o2o": fwd_o2o[pos],
+                        "decile": deciles[pos],
+                    }
+                )
+
+    periodic_returns = pd.DataFrame(results)
+    if periodic_returns.empty:
+        raise RuntimeError("No periodic results were produced. Check the date range, cadence, membership file, or filters.")
+
+    periodic_returns["date"] = pd.to_datetime(periodic_returns["date"])
+    periodic_returns = periodic_returns.set_index("date").sort_index()
+    signal_checks = pd.DataFrame(signal_rows)
+    return periodic_returns, signal_checks
+
+
 def add_cost_overlays(weekly_returns: pd.DataFrame, cost_bps_levels: tuple[float, ...]) -> pd.DataFrame:
     df = weekly_returns.copy()
     df["ls_c2c"] = df["long_ret_c2c"] - df["short_ret_c2c"]
@@ -489,13 +729,18 @@ def add_cost_overlays(weekly_returns: pd.DataFrame, cost_bps_levels: tuple[float
     return df
 
 
-def metric_summary(returns: pd.Series, name: str) -> dict[str, object] | None:
+def metric_summary(
+    returns: pd.Series,
+    name: str,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+) -> dict[str, object] | None:
     clean = returns.dropna()
-    if len(clean) < WEEKS_PER_YEAR:
+    min_required_periods = max(10, int(np.ceil(periods_per_year)))
+    if len(clean) < min_required_periods:
         return None
 
-    ann_ret = float(clean.mean() * WEEKS_PER_YEAR)
-    ann_vol = float(clean.std() * np.sqrt(WEEKS_PER_YEAR))
+    ann_ret = float(clean.mean() * periods_per_year)
+    ann_vol = float(clean.std() * np.sqrt(periods_per_year))
     sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
     cumulative = (1.0 + clean).cumprod()
     drawdown = cumulative / cumulative.cummax() - 1.0
@@ -521,7 +766,10 @@ def metric_summary(returns: pd.Series, name: str) -> dict[str, object] | None:
     }
 
 
-def build_headline_metrics(weekly_returns: pd.DataFrame) -> pd.DataFrame:
+def build_headline_metrics(
+    weekly_returns: pd.DataFrame,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+) -> pd.DataFrame:
     strategies: list[tuple[str, str]] = []
     for execution_label, prefix in [("C2C", "ls_c2c"), ("O2O", "ls_o2o")]:
         for bps in available_cost_levels(weekly_returns, prefix):
@@ -538,7 +786,11 @@ def build_headline_metrics(weekly_returns: pd.DataFrame) -> pd.DataFrame:
         )
     strategies.extend([("Short C2C", "short_ret_c2c"), ("Short O2O", "short_ret_o2o")])
 
-    rows = [metric_summary(weekly_returns[column], name) for name, column in strategies if column in weekly_returns.columns]
+    rows = [
+        metric_summary(weekly_returns[column], name, periods_per_year=periods_per_year)
+        for name, column in strategies
+        if column in weekly_returns.columns
+    ]
     rows = [row for row in rows if row is not None]
     return pd.DataFrame(rows)
 
@@ -567,7 +819,10 @@ def build_yearly_returns(weekly_returns: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("year") if rows else pd.DataFrame()
 
 
-def build_strategy_summary(weekly_returns: pd.DataFrame) -> pd.DataFrame:
+def build_strategy_summary(
+    weekly_returns: pd.DataFrame,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+) -> pd.DataFrame:
     total_turnover = weekly_returns["turnover_long"].fillna(0.0) + weekly_returns["turnover_short"].fillna(0.0)
     variants: list[tuple[str, str, float, str, str]] = []
     for execution_model, prefix in [("C2C", "ls_c2c"), ("O2O", "ls_o2o")]:
@@ -591,9 +846,9 @@ def build_strategy_summary(weekly_returns: pd.DataFrame) -> pd.DataFrame:
         gross_returns = weekly_returns.loc[returns.index, gross_column].dropna()
         total_return_pct = float(((1.0 + returns).prod() - 1.0) * 100.0)
         gross_total_return_pct = float(((1.0 + gross_returns).prod() - 1.0) * 100.0)
-        cagr_pct = safe_cagr(returns)
-        vol = float(returns.std() * np.sqrt(WEEKS_PER_YEAR))
-        sharpe = float((returns.mean() * WEEKS_PER_YEAR) / vol) if vol > 0 else 0.0
+        cagr_pct = safe_cagr(returns, periods_per_year=periods_per_year)
+        vol = float(returns.std() * np.sqrt(periods_per_year))
+        sharpe = float((returns.mean() * periods_per_year) / vol) if vol > 0 else 0.0
         max_drawdown_pct = compute_max_drawdown_pct(returns)
         avg_turnover = float(total_turnover.loc[returns.index].mean())
         total_cost_bps = float((total_turnover.loc[returns.index] * 2.0 * cost_bps_per_side).sum())
@@ -618,7 +873,11 @@ def build_strategy_summary(weekly_returns: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _plot_cumulative_returns(weekly_returns: pd.DataFrame, output_dir: Path) -> Path:
+def _plot_cumulative_returns(
+    weekly_returns: pd.DataFrame,
+    output_dir: Path,
+    cadence_label: str = "weekly Friday",
+) -> Path:
     color_sets = {
         "C2C": ["#1f77b4", "#4c78a8", "#72b7b2", "#9ecae9", "#2f4b7c"],
         "O2O": ["#ff7f0e", "#f28e2b", "#e15759", "#ffbe7d", "#b85c38"],
@@ -663,7 +922,7 @@ def _plot_cumulative_returns(weekly_returns: pd.DataFrame, output_dir: Path) -> 
             ax.legend(frameon=False, ncol=4, loc="best")
 
     axes[-1].set_xlabel("Date")
-    fig.suptitle("Weekly Mean-Reversion Cumulative Returns", fontsize=14)
+    fig.suptitle(f"Mean-Reversion Cumulative Returns ({cadence_label})", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     output_path = output_dir / "cumulative_returns.png"
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -671,16 +930,20 @@ def _plot_cumulative_returns(weekly_returns: pd.DataFrame, output_dir: Path) -> 
     return output_path
 
 
-def _plot_decile_profile(weekly_returns: pd.DataFrame, output_dir: Path) -> Path:
+def _plot_decile_profile(
+    weekly_returns: pd.DataFrame,
+    output_dir: Path,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+) -> Path:
     deciles = np.arange(1, 11)
     c2c_values = [
-        float(weekly_returns[f"dec_{decile}_c2c"].dropna().mean() * WEEKS_PER_YEAR * 100.0)
+        float(weekly_returns[f"dec_{decile}_c2c"].dropna().mean() * periods_per_year * 100.0)
         if f"dec_{decile}_c2c" in weekly_returns.columns
         else np.nan
         for decile in deciles
     ]
     o2o_values = [
-        float(weekly_returns[f"dec_{decile}_o2o"].dropna().mean() * WEEKS_PER_YEAR * 100.0)
+        float(weekly_returns[f"dec_{decile}_o2o"].dropna().mean() * periods_per_year * 100.0)
         if f"dec_{decile}_o2o" in weekly_returns.columns
         else np.nan
         for decile in deciles
@@ -737,11 +1000,16 @@ def _plot_strategy_comparison(strategy_summary: pd.DataFrame, output_dir: Path) 
     return output_path
 
 
-def save_charts(artifacts: BenchmarkArtifacts, output_dir: Path) -> list[Path]:
+def save_charts(
+    artifacts: BenchmarkArtifacts,
+    output_dir: Path,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+    cadence_label: str = "weekly Friday",
+) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     chart_paths = [
-        _plot_cumulative_returns(artifacts.weekly_returns, output_dir),
-        _plot_decile_profile(artifacts.weekly_returns, output_dir),
+        _plot_cumulative_returns(artifacts.weekly_returns, output_dir, cadence_label=cadence_label),
+        _plot_decile_profile(artifacts.weekly_returns, output_dir, periods_per_year=periods_per_year),
         _plot_strategy_comparison(artifacts.strategy_summary, output_dir),
     ]
     return chart_paths
@@ -752,6 +1020,8 @@ def print_sanity_checks(
     signal_checks: pd.DataFrame,
     market_frames: MarketFrames,
     headline_metrics: pd.DataFrame,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+    cadence_label: str = "weekly Friday",
 ) -> None:
     print("\n" + "=" * 60)
     print("SANITY CHECKS")
@@ -821,7 +1091,7 @@ def print_sanity_checks(
     print("\n--- Future Feature Test ---")
     ls_c2c = weekly_returns["ls_c2c"].dropna()
     mean_ic = float(ic_values.mean()) if not ic_values.empty else np.nan
-    gross_sharpe = float(ls_c2c.mean() / ls_c2c.std() * np.sqrt(WEEKS_PER_YEAR)) if len(ls_c2c) > 1 and ls_c2c.std() > 0 else np.nan
+    gross_sharpe = float(ls_c2c.mean() / ls_c2c.std() * np.sqrt(periods_per_year)) if len(ls_c2c) > 1 and ls_c2c.std() > 0 else np.nan
     if pd.notna(mean_ic) and mean_ic > 0.5:
         print(f"FAIL: Mean IC = {mean_ic:.4f} — suspiciously high, possible look-ahead leak")
     elif pd.notna(gross_sharpe) and gross_sharpe > 5.0:
@@ -832,8 +1102,8 @@ def print_sanity_checks(
 
     n_valid = int(weekly_returns["long_ret_c2c"].notna().sum())
     n_valid_o2o = int(weekly_returns["long_ret_o2o"].notna().sum())
-    print(f"\nValid weeks: {n_valid}/{len(weekly_returns)} ({n_valid / len(weekly_returns):.1%})")
-    print(f"Valid O2O weeks: {n_valid_o2o}/{len(weekly_returns)} ({n_valid_o2o / len(weekly_returns):.1%})")
+    print(f"\nValid observations ({cadence_label}): {n_valid}/{len(weekly_returns)} ({n_valid / len(weekly_returns):.1%})")
+    print(f"Valid O2O observations: {n_valid_o2o}/{len(weekly_returns)} ({n_valid_o2o / len(weekly_returns):.1%})")
 
     print("\n" + "=" * 60)
     print("SUMMARY STATISTICS")
@@ -859,7 +1129,13 @@ def print_sanity_checks(
                 print("*** WARNING: C2C Sharpe > 2.0 — implausibly high ***")
 
 
-def print_additional_breakdowns(weekly_returns: pd.DataFrame, yearly_returns: pd.DataFrame) -> None:
+def print_additional_breakdowns(
+    weekly_returns: pd.DataFrame,
+    yearly_returns: pd.DataFrame,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+    cadence_label: str = "weekly Friday",
+    cost_bps_levels: tuple[float, ...] = DEFAULT_COST_BPS_LEVELS,
+) -> None:
     print("\n--- DECADE BREAKDOWN ---")
     decades = {
         "1995-1999": ("1995", "1999"),
@@ -879,11 +1155,13 @@ def print_additional_breakdowns(weekly_returns: pd.DataFrame, yearly_returns: pd
             ("O2O 5bps", "ls_o2o_5"),
             ("O2O 15bps", "ls_o2o_15"),
         ]:
+            if column not in subset.columns:
+                continue
             returns = subset[column].dropna()
             if len(returns) <= 10:
                 continue
-            ann_ret = returns.mean() * WEEKS_PER_YEAR
-            ann_vol = returns.std() * np.sqrt(WEEKS_PER_YEAR)
+            ann_ret = returns.mean() * periods_per_year
+            ann_vol = returns.std() * np.sqrt(periods_per_year)
             sharpe = ann_ret / ann_vol if ann_vol > 0 else 0.0
             rows.append({"Decade": decade_name, "Variant": label, "Ann Ret": ann_ret, "Sharpe": sharpe, "N": len(returns)})
     if rows:
@@ -914,8 +1192,8 @@ def print_additional_breakdowns(weekly_returns: pd.DataFrame, yearly_returns: pd
 
     print("\n--- DECILE DECOMPOSITION ---")
     for decile in range(1, 11):
-        c2c = weekly_returns[f"dec_{decile}_c2c"].mean() * WEEKS_PER_YEAR
-        o2o = weekly_returns[f"dec_{decile}_o2o"].mean() * WEEKS_PER_YEAR
+        c2c = weekly_returns[f"dec_{decile}_c2c"].mean() * periods_per_year
+        o2o = weekly_returns[f"dec_{decile}_o2o"].mean() * periods_per_year
         suffix = " (LONG/losers)" if decile == 1 else " (SHORT/winners)" if decile == 10 else ""
         print(f"  D{decile:2d}: C2C={c2c * 100:+6.2f}%  O2O={o2o * 100:+6.2f}%{suffix}")
 
@@ -924,33 +1202,47 @@ def print_additional_breakdowns(weekly_returns: pd.DataFrame, yearly_returns: pd
     print(f"Monotonically decreasing (D1 > D10)? {monotonic}")
 
     print("\n--- LONG vs SHORT ATTRIBUTION ---")
-    long_c2c = weekly_returns["long_ret_c2c"].mean() * WEEKS_PER_YEAR
-    short_c2c = weekly_returns["short_ret_c2c"].mean() * WEEKS_PER_YEAR
-    long_o2o = weekly_returns["long_ret_o2o"].mean() * WEEKS_PER_YEAR
-    short_o2o = weekly_returns["short_ret_o2o"].mean() * WEEKS_PER_YEAR
+    long_c2c = weekly_returns["long_ret_c2c"].mean() * periods_per_year
+    short_c2c = weekly_returns["short_ret_c2c"].mean() * periods_per_year
+    long_o2o = weekly_returns["long_ret_o2o"].mean() * periods_per_year
+    short_o2o = weekly_returns["short_ret_o2o"].mean() * periods_per_year
     print(f"C2C: Long={long_c2c * 100:.2f}%, Short={short_c2c * 100:.2f}%, Spread={((long_c2c - short_c2c) * 100):.2f}%")
     print(f"O2O: Long={long_o2o * 100:.2f}%, Short={short_o2o * 100:.2f}%, Spread={((long_o2o - short_o2o) * 100):.2f}%")
 
     print("\n--- TURNOVER ---")
     turnover_long = float(weekly_returns["turnover_long"].mean())
     turnover_short = float(weekly_returns["turnover_short"].mean())
-    print(f"Avg weekly one-way: Long={turnover_long:.4f} ({turnover_long * 100:.1f}%), Short={turnover_short:.4f} ({turnover_short * 100:.1f}%)")
-    for bps in DEFAULT_COST_BPS_LEVELS:
-        drag = (turnover_long + turnover_short) * 2.0 * (bps / 10000.0) * WEEKS_PER_YEAR
+    print(
+        f"Avg one-way turnover ({cadence_label}): "
+        f"Long={turnover_long:.4f} ({turnover_long * 100:.1f}%), "
+        f"Short={turnover_short:.4f} ({turnover_short * 100:.1f}%)"
+    )
+    for bps in cost_bps_levels:
+        drag = (turnover_long + turnover_short) * 2.0 * (bps / 10000.0) * periods_per_year
         print(f"  Annual cost drag at {bps:g} bps/side: {drag * 100:.2f}%")
 
     print("\n--- YEAR-BY-YEAR ---")
     print(yearly_returns.to_string(float_format=lambda value: f"{value:+.4f}"))
 
 
-def save_artifacts(artifacts: BenchmarkArtifacts, output_dir: Path) -> None:
+def save_artifacts(
+    artifacts: BenchmarkArtifacts,
+    output_dir: Path,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+    cadence_label: str = "weekly Friday",
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     artifacts.weekly_returns.to_csv(output_dir / "weekly_returns.csv")
     artifacts.signal_checks.to_csv(output_dir / "signal_checks.csv", index=False)
     artifacts.headline_metrics.to_csv(output_dir / "headline_metrics.csv", index=False)
     artifacts.yearly_returns.to_csv(output_dir / "yearly_returns.csv")
     artifacts.strategy_summary.to_csv(output_dir / "strategy_summary.csv", index=False)
-    chart_paths = save_charts(artifacts, output_dir)
+    chart_paths = save_charts(
+        artifacts,
+        output_dir,
+        periods_per_year=periods_per_year,
+        cadence_label=cadence_label,
+    )
 
     print("\nSaved outputs:")
     print(f"  {output_dir / 'weekly_returns.csv'}")
@@ -977,11 +1269,14 @@ def run_benchmark(config: BenchmarkConfig, histories: dict[str, pd.DataFrame] | 
     print(f"   Unadjusted close frame shape: {market_frames.unadj_close_df.shape}")
     gc.collect()
 
-    weekly_returns, signal_checks = run_weekly_strategy(market_frames, membership_lookup, config)
+    if config.cadence_mode == "weekly_friday":
+        weekly_returns, signal_checks = run_weekly_strategy(market_frames, membership_lookup, config)
+    else:
+        weekly_returns, signal_checks = run_periodic_strategy(market_frames, membership_lookup, config)
     weekly_returns = add_cost_overlays(weekly_returns, config.cost_bps_levels)
-    headline_metrics = build_headline_metrics(weekly_returns)
+    headline_metrics = build_headline_metrics(weekly_returns, periods_per_year=config.periods_per_year())
     yearly_returns = build_yearly_returns(weekly_returns)
-    strategy_summary = build_strategy_summary(weekly_returns)
+    strategy_summary = build_strategy_summary(weekly_returns, periods_per_year=config.periods_per_year())
 
     return BenchmarkArtifacts(
         weekly_returns=weekly_returns,
@@ -1001,6 +1296,11 @@ def main(argv: list[str] | None = None) -> BenchmarkArtifacts:
         output_dir=args.output_dir,
         membership_path=args.membership_path,
         cost_bps_levels=tuple(args.cost_bps_levels),
+        cadence_mode=args.cadence_mode,
+        signal_lookback_days=args.signal_lookback_days,
+        rebalance_days=args.rebalance_days,
+        holding_days=args.holding_days,
+        positions_per_side=args.positions_per_side,
     )
 
     print("\n" + "=" * 80)
@@ -1010,11 +1310,38 @@ def main(argv: list[str] | None = None) -> BenchmarkArtifacts:
     print(f"Output dir     : {config.output_dir}")
     print(f"Membership file: {config.membership_path}")
     print(f"Cost levels    : {', '.join(f'{bps:g}bps' for bps in config.cost_bps_levels)}")
+    print(f"Cadence mode   : {config.cadence_label()}")
+    print(
+        "Selection mode : "
+        + (
+            f"top/bottom {int(config.positions_per_side)} names"
+            if config.positions_per_side is not None
+            else "loser/winner deciles"
+        )
+    )
 
     artifacts = run_benchmark(config)
-    save_artifacts(artifacts, config.output_dir)
-    print_sanity_checks(artifacts.weekly_returns, artifacts.signal_checks, artifacts.market_frames, artifacts.headline_metrics)
-    print_additional_breakdowns(artifacts.weekly_returns, artifacts.yearly_returns)
+    save_artifacts(
+        artifacts,
+        config.output_dir,
+        periods_per_year=config.periods_per_year(),
+        cadence_label=config.cadence_label(),
+    )
+    print_sanity_checks(
+        artifacts.weekly_returns,
+        artifacts.signal_checks,
+        artifacts.market_frames,
+        artifacts.headline_metrics,
+        periods_per_year=config.periods_per_year(),
+        cadence_label=config.cadence_label(),
+    )
+    print_additional_breakdowns(
+        artifacts.weekly_returns,
+        artifacts.yearly_returns,
+        periods_per_year=config.periods_per_year(),
+        cadence_label=config.cadence_label(),
+        cost_bps_levels=config.cost_bps_levels,
+    )
 
     print("\n--- STRATEGY SUMMARY ---")
     print(

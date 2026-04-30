@@ -234,6 +234,30 @@ class PromptModeTests(unittest.TestCase):
         self.assertAlmostEqual(mean_reversion_universe["AAA"]["trail_return_5d"], -0.1)
         self.assertAlmostEqual(mean_reversion_universe["AAA"]["mean_reversion_signal"], 0.1)
 
+    def test_mean_reversion_loader_handles_gapped_row_indexes(self):
+        df = pd.DataFrame(
+            [
+                {"date": pd.Timestamp("2024-01-01"), "adj_close": 10.0},
+                {"date": pd.Timestamp("2024-01-02"), "adj_close": 10.5},
+                {"date": pd.Timestamp("2024-01-03"), "adj_close": 11.0},
+                {"date": pd.Timestamp("2024-01-04"), "adj_close": 11.5},
+                {"date": pd.Timestamp("2024-01-05"), "adj_close": 12.0},
+                {"date": pd.Timestamp("2024-01-08"), "adj_close": 9.0},
+            ],
+            index=[10, 11, 12, 13, 14, 20],
+        )
+        composite_dfs = {"AAA": df}
+
+        universe = load_signal_data_preloaded(
+            composite_dfs,
+            pd.Timestamp("2024-01-08"),
+            strategy_style="mean_reversion",
+        )
+
+        self.assertIn("AAA", universe)
+        self.assertAlmostEqual(universe["AAA"]["trail_return_5d"], -0.1)
+        self.assertAlmostEqual(universe["AAA"]["mean_reversion_signal"], 0.1)
+
     def test_deterministic_weight_builder_normalizes_candidate_utilities(self):
         signal_stage_output = {
             "long_candidates": [

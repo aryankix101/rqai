@@ -118,6 +118,62 @@ class RunBacktestV3Tests(unittest.TestCase):
             }
             self.assertEqual(expected_files, {path.name for path in config.output_dir.iterdir()})
 
+    def test_run_benchmark_supports_trading_day_cadence_mode(self):
+        histories = _make_synthetic_histories()
+        tickers = sorted(histories.keys())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            membership_path = tmpdir_path / "membership.csv"
+            _write_membership_csv(membership_path, tickers)
+
+            config = rb.BenchmarkConfig(
+                start=pd.Timestamp("2000-01-01"),
+                end=pd.Timestamp("2000-02-29"),
+                output_dir=tmpdir_path / "outputs_10d",
+                membership_path=membership_path,
+                cadence_mode="trading_days",
+                signal_lookback_days=5,
+                rebalance_days=10,
+                holding_days=10,
+            )
+
+            artifacts = rb.run_benchmark(config, histories=histories)
+
+            self.assertFalse(artifacts.weekly_returns.empty)
+            self.assertIn("ls_c2c_5", artifacts.weekly_returns.columns)
+            self.assertGreaterEqual(artifacts.weekly_returns.index.min(), pd.Timestamp("2000-01-01"))
+            self.assertLessEqual(artifacts.weekly_returns.index.max(), pd.Timestamp("2000-02-29"))
+            self.assertLess(len(artifacts.weekly_returns), 8)
+
+    def test_run_benchmark_supports_fixed_book_size(self):
+        histories = _make_synthetic_histories(num_tickers=120)
+        tickers = sorted(histories.keys())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            membership_path = tmpdir_path / "membership.csv"
+            _write_membership_csv(membership_path, tickers)
+
+            config = rb.BenchmarkConfig(
+                start=pd.Timestamp("2000-01-01"),
+                end=pd.Timestamp("2000-02-29"),
+                output_dir=tmpdir_path / "outputs_fixed_book",
+                membership_path=membership_path,
+                cadence_mode="trading_days",
+                signal_lookback_days=5,
+                rebalance_days=10,
+                holding_days=10,
+                positions_per_side=10,
+            )
+
+            artifacts = rb.run_benchmark(config, histories=histories)
+
+            self.assertFalse(artifacts.weekly_returns.empty)
+            self.assertTrue((artifacts.weekly_returns["n_long"] == 10).all())
+            self.assertTrue((artifacts.weekly_returns["n_short"] == 10).all())
+            self.assertIn("ls_c2c_5", artifacts.weekly_returns.columns)
+
 
 if __name__ == "__main__":
     unittest.main()
