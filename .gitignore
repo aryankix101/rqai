@@ -4,6 +4,8 @@ secrets.json
 cache/
 out/
 backtest_results/
+debug_pull/
+local_archive/
 VIXCLS.csv
 WM1NS.csv
 WM2NS.csv
