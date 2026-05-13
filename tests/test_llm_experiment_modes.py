@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from data_source_config import DATASET_VERSION
+from data_source_config import DATASET_VERSION, RUSSELL_MEMBERSHIP_PATH
 from llm_ab_comparison import compute_metrics, summarize_backtest_health
 from llm_portfolio_constructor import (
     COMPOSITE_SCORES_DIR,
@@ -258,6 +258,45 @@ class PromptModeTests(unittest.TestCase):
         self.assertAlmostEqual(universe["AAA"]["trail_return_5d"], -0.1)
         self.assertAlmostEqual(universe["AAA"]["mean_reversion_signal"], 0.1)
 
+    def test_loader_applies_optional_membership_gate(self):
+        composite_dfs = {
+            "AAA": pd.DataFrame(
+                [
+                    {"date": pd.Timestamp("2024-01-01"), "adj_close": 10.0},
+                    {"date": pd.Timestamp("2024-01-02"), "adj_close": 10.5},
+                    {"date": pd.Timestamp("2024-01-03"), "adj_close": 11.0},
+                    {"date": pd.Timestamp("2024-01-04"), "adj_close": 11.5},
+                    {"date": pd.Timestamp("2024-01-05"), "adj_close": 12.0},
+                    {"date": pd.Timestamp("2024-01-08"), "adj_close": 9.0},
+                ]
+            ),
+            "BBB": pd.DataFrame(
+                [
+                    {"date": pd.Timestamp("2024-01-01"), "adj_close": 20.0},
+                    {"date": pd.Timestamp("2024-01-02"), "adj_close": 20.5},
+                    {"date": pd.Timestamp("2024-01-03"), "adj_close": 21.0},
+                    {"date": pd.Timestamp("2024-01-04"), "adj_close": 21.5},
+                    {"date": pd.Timestamp("2024-01-05"), "adj_close": 22.0},
+                    {"date": pd.Timestamp("2024-01-08"), "adj_close": 23.0},
+                ]
+            ),
+        }
+        membership_lookup = {
+            "dates_ns": pd.Series([pd.Timestamp("2024-01-08")]).to_numpy(dtype="datetime64[ns]").view("i8"),
+            "universes": (frozenset({"AAA"}),),
+            "path": "test_membership",
+        }
+
+        universe = load_signal_data_preloaded(
+            composite_dfs,
+            pd.Timestamp("2024-01-08"),
+            strategy_style="mean_reversion",
+            membership_lookup=membership_lookup,
+        )
+
+        self.assertIn("AAA", universe)
+        self.assertNotIn("BBB", universe)
+
     def test_deterministic_weight_builder_normalizes_candidate_utilities(self):
         signal_stage_output = {
             "long_candidates": [
@@ -334,6 +373,8 @@ class CacheCompatibilityTests(unittest.TestCase):
                 "llm_source_policy": "strict_llm_only",
                 "source_dataset": DATASET_VERSION,
                 "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+                "membership_gating_enabled": True,
+                "membership_path": str(RUSSELL_MEMBERSHIP_PATH),
             },
             "portfolios": {
                 "2024-01-05": {
@@ -378,7 +419,7 @@ class CacheCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(
             build_cache_filename("2019-01-01", "2019-12-31", 5, True, False),
-            f"llm_portfolio_deterministic_2019-01-01_2019-12-31_5d_equal_weight_signal_only_{DATASET_VERSION}.json",
+            f"llm_portfolio_deterministic_2019-01-01_2019-12-31_5d_equal_weight_signal_only_{DATASET_VERSION}_r1000.json",
         )
 
     def test_cache_compatibility_requires_matching_strategy_style(self):
@@ -402,6 +443,8 @@ class CacheCompatibilityTests(unittest.TestCase):
                 "llm_source_policy": "strict_llm_only",
                 "source_dataset": DATASET_VERSION,
                 "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+                "membership_gating_enabled": True,
+                "membership_path": str(RUSSELL_MEMBERSHIP_PATH),
             },
             "portfolios": {
                 "2024-01-05": {
@@ -450,6 +493,8 @@ class CacheCompatibilityTests(unittest.TestCase):
                 "llm_source_policy": "strict_llm_only",
                 "source_dataset": DATASET_VERSION,
                 "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+                "membership_gating_enabled": True,
+                "membership_path": str(RUSSELL_MEMBERSHIP_PATH),
             },
             "portfolios": {
                 "2024-01-05": {
@@ -514,6 +559,8 @@ class CacheCompatibilityTests(unittest.TestCase):
                 "llm_source_policy": "strict_llm_only",
                 "source_dataset": DATASET_VERSION,
                 "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+                "membership_gating_enabled": True,
+                "membership_path": str(RUSSELL_MEMBERSHIP_PATH),
             },
             "portfolios": {
                 "2024-01-05": {
@@ -599,6 +646,190 @@ class CacheCompatibilityTests(unittest.TestCase):
         self.assertIn("mdl-", baseline)
         self.assertIn("top60", baseline)
         self.assertIn("temp0p15", baseline)
+
+    def test_mean_reversion_cache_filename_and_compatibility_separate_candidate_mode(self):
+        fixed_top_n = build_cache_filename(
+            "2019-01-01",
+            "2019-12-31",
+            5,
+            True,
+            False,
+            strategy_style="mean_reversion",
+            model=DEFAULT_MODEL,
+            temperature=0.15,
+            top_n_magnitude=100,
+            mean_reversion_candidate_mode="fixed_top_n",
+        )
+        decile = build_cache_filename(
+            "2019-01-01",
+            "2019-12-31",
+            5,
+            True,
+            False,
+            strategy_style="mean_reversion",
+            model=DEFAULT_MODEL,
+            temperature=0.15,
+            top_n_magnitude=100,
+            mean_reversion_candidate_mode="decile",
+        )
+
+        self.assertNotEqual(fixed_top_n, decile)
+        self.assertIn("cand-fixed-top-n", fixed_top_n)
+        self.assertIn("cand-decile", decile)
+
+        cache = {
+            "metadata": {
+                "schema_version": 3,
+                "execution_mode": "equal_weight",
+                "turnover_aware": False,
+                "strategy_style": "mean_reversion",
+                "model": DEFAULT_MODEL,
+                "temperature": 0.15,
+                "top_n_magnitude": 100,
+                "mean_reversion_candidate_mode": "decile",
+                "strategy_signal_source": "trail_return_5d_rank_v1",
+                "prompt_style": prompt_style_label(False),
+                "prompt_format_version": PROMPT_FORMAT_VERSION,
+                "target_positions_per_side": 50,
+                "log_llm_trace": False,
+                "loss_memory_enabled": False,
+                "loss_memory_top_k": 3,
+                "loss_memory_max_targets_per_side": 4,
+                "llm_source_policy": "strict_llm_only",
+                "source_dataset": DATASET_VERSION,
+                "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+                "membership_gating_enabled": True,
+                "membership_path": str(RUSSELL_MEMBERSHIP_PATH),
+            },
+            "portfolios": {
+                "2024-01-05": {
+                    "llm_source": "llm",
+                    "long_basket": [{"ticker": "AAA", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                    "short_basket": [{"ticker": "BBB", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                }
+            },
+        }
+
+        self.assertTrue(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style="mean_reversion",
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=100,
+                target_positions_per_side=50,
+                mean_reversion_candidate_mode="decile",
+            )
+        )
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style="mean_reversion",
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=100,
+                target_positions_per_side=50,
+                mean_reversion_candidate_mode="fixed_top_n",
+            )
+        )
+
+    def test_mean_reversion_cache_filename_and_compatibility_separate_compact_output(self):
+        verbose = build_cache_filename(
+            "2019-01-01",
+            "2019-12-31",
+            5,
+            True,
+            False,
+            strategy_style="mean_reversion",
+            model=DEFAULT_MODEL,
+            temperature=0.15,
+            top_n_magnitude=100,
+            mean_reversion_candidate_mode="decile",
+            compact_output=False,
+        )
+        compact = build_cache_filename(
+            "2019-01-01",
+            "2019-12-31",
+            5,
+            True,
+            False,
+            strategy_style="mean_reversion",
+            model=DEFAULT_MODEL,
+            temperature=0.15,
+            top_n_magnitude=100,
+            mean_reversion_candidate_mode="decile",
+            compact_output=True,
+        )
+
+        self.assertNotEqual(verbose, compact)
+        self.assertIn("_compact", compact)
+
+        cache = {
+            "metadata": {
+                "schema_version": 3,
+                "execution_mode": "equal_weight",
+                "turnover_aware": False,
+                "strategy_style": "mean_reversion",
+                "model": DEFAULT_MODEL,
+                "temperature": 0.15,
+                "top_n_magnitude": 100,
+                "mean_reversion_candidate_mode": "decile",
+                "compact_output": True,
+                "strategy_signal_source": "trail_return_5d_rank_v1",
+                "prompt_style": prompt_style_label(False),
+                "prompt_format_version": PROMPT_FORMAT_VERSION,
+                "target_positions_per_side": 50,
+                "log_llm_trace": False,
+                "loss_memory_enabled": False,
+                "loss_memory_top_k": 3,
+                "loss_memory_max_targets_per_side": 4,
+                "llm_source_policy": "strict_llm_only",
+                "source_dataset": DATASET_VERSION,
+                "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+                "membership_gating_enabled": True,
+                "membership_path": str(RUSSELL_MEMBERSHIP_PATH),
+            },
+            "portfolios": {
+                "2024-01-05": {
+                    "llm_source": "llm",
+                    "long_basket": [{"ticker": "AAA", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                    "short_basket": [{"ticker": "BBB", "llm_source": "llm", "weight_raw": 0.5, "weight_exec": 0.5}],
+                }
+            },
+        }
+
+        self.assertTrue(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style="mean_reversion",
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=100,
+                target_positions_per_side=50,
+                mean_reversion_candidate_mode="decile",
+                compact_output=True,
+            )
+        )
+        self.assertFalse(
+            _cache_is_compatible(
+                cache,
+                "equal_weight",
+                turnover_aware=False,
+                strategy_style="mean_reversion",
+                model=DEFAULT_MODEL,
+                temperature=0.15,
+                top_n_magnitude=100,
+                target_positions_per_side=50,
+                mean_reversion_candidate_mode="decile",
+                compact_output=False,
+            )
+        )
 
     def test_strategy_resolver_returns_expected_modules(self):
         self.assertEqual(_resolve_llm_strategy_module("deterministic").__name__, "technical_llm")

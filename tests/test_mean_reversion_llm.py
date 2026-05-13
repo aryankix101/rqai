@@ -167,6 +167,75 @@ class MeanReversionPromptTests(unittest.TestCase):
         self.assertIn("WINNER", short_tickers)
         self.assertIn("UP_BUT_OVERBOUGHT", short_tickers)
 
+    def test_decile_candidate_mode_uses_exact_d1_d10_buckets(self):
+        universe = {}
+        for idx in range(23):
+            ticker = f"T{idx:02d}"
+            trail_return = (idx - 11) / 100.0
+            universe[ticker] = {
+                "direction_score": 0.0,
+                "magnitude_score": 0.0,
+                "trail_return_5d": trail_return,
+                "mean_reversion_signal": -trail_return,
+                "indicators": {},
+            }
+
+        candidate_views = _build_mean_reversion_candidate_views(
+            universe,
+            top_n_candidates=5,
+            candidate_mode="decile",
+        )
+        long_tickers = [entry["ticker"] for entry in candidate_views["long_candidates"]]
+        short_tickers = [entry["ticker"] for entry in candidate_views["short_candidates"]]
+
+        self.assertEqual(long_tickers, ["T00", "T01", "T02"])
+        self.assertEqual(short_tickers, ["T22", "T21"])
+        self.assertEqual(candidate_views["candidate_mode"], "decile")
+
+        prompt_body = _format_universe_for_prompt(
+            universe=universe,
+            previous_portfolio=None,
+            regime="normal",
+            rebalance_id="w_00001",
+            turnover_aware=False,
+            top_n_magnitude=5,
+            candidate_mode="decile",
+        )
+        self.assertIn("exact full-universe deciles: D1 for longs and D10 for shorts", prompt_body)
+        self.assertIn("D1 OVERSOLD LONG CANDIDATES (3 names)", prompt_body)
+        self.assertIn("D10 OVERBOUGHT SHORT CANDIDATES (2 names)", prompt_body)
+
+    def test_compact_output_prompt_omits_rationale_requirement(self):
+        universe = {
+            "AAA": {
+                "direction_score": 0.0,
+                "magnitude_score": 0.0,
+                "trail_return_5d": -0.10,
+                "mean_reversion_signal": 0.10,
+                "indicators": {},
+            },
+            "BBB": {
+                "direction_score": 0.0,
+                "magnitude_score": 0.0,
+                "trail_return_5d": 0.10,
+                "mean_reversion_signal": -0.10,
+                "indicators": {},
+            },
+        }
+
+        prompt_body = _format_universe_for_prompt(
+            universe=universe,
+            previous_portfolio=None,
+            regime="normal",
+            rebalance_id="w_00001",
+            turnover_aware=False,
+            top_n_magnitude=1,
+            compact_output=True,
+        )
+
+        self.assertIn("Compact output: omit per-name rationales", prompt_body)
+        self.assertNotIn("Keep rationales short fragments", prompt_body)
+
     def test_candidate_views_keep_prompt_sides_disjoint_even_in_small_universe(self):
         universe = {
             "AAA": {

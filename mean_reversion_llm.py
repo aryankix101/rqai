@@ -44,6 +44,7 @@ from technical_llm import (
 
 TRAIL_LOOKBACK_DAYS = 5
 TRAIL_RETURN_KEY = f"trail_return_{TRAIL_LOOKBACK_DAYS}d"
+MEAN_REVERSION_CANDIDATE_MODES = {"fixed_top_n", "decile"}
 
 
 MEAN_REVERSION_SIGNAL_STAGE_SYSTEM_PROMPT_TEMPLATE = """
@@ -117,13 +118,47 @@ SIGNAL_STAGE_TURNOVER_CONTEXT = """
 
 def build_signal_stage_system_prompt(turnover_aware: bool) -> str:
     """Build the stage-1 mean-reversion alpha discovery prompt."""
+    return _build_signal_stage_system_prompt(turnover_aware=turnover_aware, compact_output=False)
+
+
+def _build_signal_stage_system_prompt(turnover_aware: bool, compact_output: bool = False) -> str:
+    """Build the stage-1 mean-reversion alpha discovery prompt."""
     pipeline_context = (
         SIGNAL_STAGE_TURNOVER_CONTEXT if turnover_aware else SIGNAL_STAGE_SIGNAL_ONLY_CONTEXT
     )
-    return MEAN_REVERSION_SIGNAL_STAGE_SYSTEM_PROMPT_TEMPLATE.replace(
+    prompt = MEAN_REVERSION_SIGNAL_STAGE_SYSTEM_PROMPT_TEMPLATE.replace(
         "__PIPELINE_CONTEXT__",
         pipeline_context.strip(),
     )
+    if compact_output:
+        verbose_schema = """OUTPUT FORMAT (STRICT JSON):
+{
+  "long_candidates": [
+    {"ticker": "AAPL", "edge_score": 88, "rationale": "Oversold stretch with snapback setup"},
+    ...
+  ],
+  "short_candidates": [
+    {"ticker": "XYZ", "edge_score": 84, "rationale": "Overbought extension with fade risk"},
+    ...
+  ],
+  "reasoning": "2-3 sentence summary of the alpha slate",
+  "regime_adjustment": "How the regime affected your candidate quality threshold"
+}
+"""
+        compact_schema = """OUTPUT FORMAT (STRICT JSON, COMPACT):
+{
+  "long_candidates": [
+    {"ticker": "AAPL", "edge_score": 88},
+    ...
+  ],
+  "short_candidates": [
+    {"ticker": "XYZ", "edge_score": 84},
+    ...
+  ]
+}
+"""
+        prompt = prompt.replace(verbose_schema, compact_schema)
+    return prompt
 
 
 def build_turnover_overlay_system_prompt() -> str:
@@ -155,7 +190,21 @@ def _build_signal_percentiles(signal_rows: list[dict]) -> dict[str, float]:
     }
 
 
-def _build_mean_reversion_candidate_views(universe: dict, top_n_candidates: int = 60) -> dict:
+def _normalize_candidate_mode(candidate_mode: str = "fixed_top_n") -> str:
+    normalized = str(candidate_mode or "fixed_top_n").strip().lower()
+    if normalized not in MEAN_REVERSION_CANDIDATE_MODES:
+        raise ValueError(
+            f"candidate_mode must be one of {sorted(MEAN_REVERSION_CANDIDATE_MODES)}, "
+            f"got {candidate_mode!r}"
+        )
+    return normalized
+
+
+def _build_mean_reversion_candidate_views(
+    universe: dict,
+    top_n_candidates: int = 60,
+    candidate_mode: str = "fixed_top_n",
+) -> dict:
     scored_rows = []
     for ticker, payload in universe.items():
         mean_reversion_signal = _safe_float(payload.get("mean_reversion_signal"), np.nan)
@@ -177,7 +226,14 @@ def _build_mean_reversion_candidate_views(universe: dict, top_n_candidates: int 
         row["long_score"] = long_score
         row["short_score"] = 1.0 - long_score
 
-    candidate_n = max(1, min(int(top_n_candidates), len(scored_rows)))
+    normalized_mode = _normalize_candidate_mode(candidate_mode)
+    if not scored_rows:
+        return {
+            "signal_percentiles": signal_percentiles,
+            "long_candidates": [],
+            "short_candidates": [],
+            "candidate_mode": normalized_mode,
+        }
 
     long_ranked = sorted(
         scored_rows,
@@ -189,20 +245,37 @@ def _build_mean_reversion_candidate_views(universe: dict, top_n_candidates: int 
         key=lambda row: row["mean_reversion_signal"],
     )
 
-    top_longs = long_ranked[:candidate_n]
-    excluded_for_shorts = {row["ticker"] for row in top_longs}
-    top_shorts = []
-    for row in short_ranked:
-        if row["ticker"] in excluded_for_shorts:
-            continue
-        top_shorts.append(row)
-        if len(top_shorts) >= candidate_n:
-            break
+    if normalized_mode == "decile":
+        asset_count = len(scored_rows)
+        rank_order = np.argsort(
+            [-row["mean_reversion_signal"] for row in scored_rows],
+            kind="mergesort",
+        )
+        order = np.empty(asset_count, dtype=int)
+        order[rank_order] = np.arange(asset_count)
+        deciles = np.clip((order * 10) // asset_count + 1, 1, 10)
+        for idx, row in enumerate(scored_rows):
+            row["decile"] = int(deciles[idx])
+
+        top_longs = [row for row in long_ranked if row.get("decile") == 1]
+        top_shorts = [row for row in short_ranked if row.get("decile") == 10]
+    else:
+        candidate_n = max(1, min(int(top_n_candidates), len(scored_rows)))
+        top_longs = long_ranked[:candidate_n]
+        excluded_for_shorts = {row["ticker"] for row in top_longs}
+        top_shorts = []
+        for row in short_ranked:
+            if row["ticker"] in excluded_for_shorts:
+                continue
+            top_shorts.append(row)
+            if len(top_shorts) >= candidate_n:
+                break
 
     return {
         "signal_percentiles": signal_percentiles,
         "long_candidates": top_longs,
         "short_candidates": top_shorts,
+        "candidate_mode": normalized_mode,
     }
 
 
@@ -215,13 +288,20 @@ def _format_universe_for_prompt(
     target_positions_per_side: Optional[int] = None,
     turnover_aware: bool = False,
     loss_memory_context: str = "",
+    candidate_mode: str = "fixed_top_n",
+    compact_output: bool = False,
 ) -> str:
     """Format a full-universe mean-reversion ranking for stage-1 alpha discovery."""
     del previous_portfolio  # Unused. Kept for backwards-compatible call sites.
 
-    candidate_views = _build_mean_reversion_candidate_views(universe, top_n_candidates=top_n_magnitude)
+    candidate_views = _build_mean_reversion_candidate_views(
+        universe,
+        top_n_candidates=top_n_magnitude,
+        candidate_mode=candidate_mode,
+    )
     top_longs = candidate_views["long_candidates"]
     top_shorts = candidate_views["short_candidates"]
+    normalized_candidate_mode = candidate_views["candidate_mode"]
 
     def indicator_value(indicators: dict, key: str) -> float:
         return _safe_float(indicators.get(key), 0.0)
@@ -261,6 +341,10 @@ def _format_universe_for_prompt(
     lines.append("CANDIDATE CONSTRUCTION:")
     lines.append(f"  Broad full-universe mean-reversion ranking using {TRAIL_LOOKBACK_DAYS}-trading-day trailing return.")
     lines.append("  Signal is mean_reversion_signal = -(trailing return), so longs are recent losers and shorts are recent winners.")
+    if normalized_candidate_mode == "decile":
+        lines.append("  Candidate buckets are exact full-universe deciles: D1 for longs and D10 for shorts.")
+    else:
+        lines.append(f"  Candidate buckets are fixed top/bottom ranked lists capped at {top_n_magnitude} names per side.")
     lines.append("")
 
     if loss_memory_context:
@@ -277,7 +361,10 @@ def _format_universe_for_prompt(
         f"{'Mom3m':>7} {'AutoC':>7} {'ADX':>7} {'VolPctl':>8}"
     )
 
-    lines.append(f"=== TOP {len(top_longs)} OVERSOLD LONG CANDIDATES ===")
+    if normalized_candidate_mode == "decile":
+        lines.append(f"=== D1 OVERSOLD LONG CANDIDATES ({len(top_longs)} names) ===")
+    else:
+        lines.append(f"=== TOP {len(top_longs)} OVERSOLD LONG CANDIDATES ===")
     if top_longs:
         lines.append(header)
         lines.append("-" * 126)
@@ -285,7 +372,10 @@ def _format_universe_for_prompt(
             lines.append(format_candidate_row(entry))
     lines.append("")
 
-    lines.append(f"=== TOP {len(top_shorts)} OVERBOUGHT SHORT CANDIDATES ===")
+    if normalized_candidate_mode == "decile":
+        lines.append(f"=== D10 OVERBOUGHT SHORT CANDIDATES ({len(top_shorts)} names) ===")
+    else:
+        lines.append(f"=== TOP {len(top_shorts)} OVERBOUGHT SHORT CANDIDATES ===")
     if top_shorts:
         lines.append(header)
         lines.append("-" * 126)
@@ -302,7 +392,10 @@ def _format_universe_for_prompt(
         lines.append("3. Ignore previous holdings, turnover, and transaction costs")
     lines.append("4. Prefer reversal quality over tiny sizing differences")
     lines.append("5. Do not assign weights in this stage")
-    lines.append("6. Keep rationales short fragments, ideally <= 8 words")
+    if compact_output:
+        lines.append("6. Compact output: omit per-name rationales; ticker and edge_score are enough")
+    else:
+        lines.append("6. Keep rationales short fragments, ideally <= 8 words")
 
     return "\n".join(lines)
 
@@ -398,6 +491,8 @@ async def construct_signal_candidates_from_universe(
     turnover_aware: bool,
     loss_memory_context: str = "",
     log_llm_trace: bool = False,
+    candidate_mode: str = "fixed_top_n",
+    compact_output: bool = False,
 ) -> dict:
     """Stage 1: discover the best current mean-reversion candidate slates."""
     valid_tickers = set(universe.keys())
@@ -411,6 +506,14 @@ async def construct_signal_candidates_from_universe(
         target_positions_per_side=target_positions_per_side,
         turnover_aware=turnover_aware,
         loss_memory_context=loss_memory_context,
+        candidate_mode=candidate_mode,
+        compact_output=compact_output,
+    )
+    output_schema = (
+        '{"long_candidates":[{"ticker":"AAPL","edge_score":88},...],'
+        '"short_candidates":[{"ticker":"XYZ","edge_score":84},...]}'
+        if compact_output
+        else "the signal-stage schema"
     )
 
     user_content = f"""Build ranked long and short candidate slates from this mean-reversion universe.
@@ -422,18 +525,18 @@ RULES:
 - Ignore previous holdings, turnover, and transaction costs in this stage
 - Only use tickers from the universe above
 - Do NOT assign weights
-- Keep rationales very short
-- Return ONLY valid JSON matching the signal-stage schema
+- {"Do NOT include per-name rationales" if compact_output else "Keep rationales very short"}
+- Return ONLY valid JSON matching {output_schema}
 """
 
     base_messages = [
-        {"role": "system", "content": build_signal_stage_system_prompt(turnover_aware)},
+        {"role": "system", "content": _build_signal_stage_system_prompt(turnover_aware, compact_output=compact_output)},
         {"role": "user", "content": user_content},
     ]
     retry_instruction = (
         "Your previous response was invalid. Return ONLY valid JSON with long_candidates "
-        "and short_candidates arrays. Each entry needs ticker, edge_score, "
-        "and rationale. "
+        "and short_candidates arrays. Each entry needs ticker and edge_score. "
+        f"{'Do not include rationales. ' if compact_output else 'Rationales are allowed but must be short. '}"
         f"{position_count_rule_text(target_positions_per_side, 'candidates')}. "
         "Do not assign weights."
     )
@@ -468,6 +571,8 @@ async def construct_portfolio_from_universe(
     turnover_aware: bool = False,
     loss_memory_context: str = "",
     log_llm_trace: bool = False,
+    candidate_mode: str = "fixed_top_n",
+    compact_output: bool = False,
 ) -> dict:
     """Run the two-stage LLM portfolio pipeline using mean-reversion alpha discovery."""
     if mask_date:
@@ -488,6 +593,8 @@ async def construct_portfolio_from_universe(
             turnover_aware=turnover_aware,
             loss_memory_context=loss_memory_context,
             log_llm_trace=log_llm_trace,
+            candidate_mode=candidate_mode,
+            compact_output=compact_output,
         )
 
         candidate_lookup = _build_candidate_lookup(signal_stage_output)
@@ -618,4 +725,5 @@ __all__ = [
     "build_turnover_overlay_system_prompt",
     "construct_portfolio_from_universe",
     "construct_signal_candidates_from_universe",
+    "MEAN_REVERSION_CANDIDATE_MODES",
 ]

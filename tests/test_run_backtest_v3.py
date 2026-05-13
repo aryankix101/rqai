@@ -109,6 +109,7 @@ class RunBacktestV3Tests(unittest.TestCase):
             expected_files = {
                 "weekly_returns.csv",
                 "signal_checks.csv",
+                "portfolio_selections.csv",
                 "headline_metrics.csv",
                 "yearly_returns.csv",
                 "strategy_summary.csv",

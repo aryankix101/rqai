@@ -54,6 +54,8 @@ REBALANCE_DAYS = FORWARD_DAYS
 TOP_N = 30
 BOTTOM_N = 30
 COST_RATE = 0.0015  # 15 bps one-way cost (commission + spread + slippage per trade)
+LLM_MISSING_POLICY = "renormalize_survivors"
+LLM_MISSING_POLICIES = {"renormalize_survivors", "cash_missing", "fail_if_incomplete"}
                      # Turnover = sum(|w_new - w_old|) = 2x full notional traded (long-short)
 SCORE_TYPES = ["direction_score", "magnitude_score"]
 LLM_REQUIRED_COLUMNS = {
@@ -442,6 +444,7 @@ def _explicit_llm_snapshot(
     prepared_ticker_data,
     available_signal_dates=None,
     membership_lookup: RussellMembershipLookup | None = None,
+    llm_missing_policy: str = "renormalize_survivors",
 ):
     """Collect explicit LLM selections with prices/scores for logging and execution."""
     resolved_signal_date = _resolve_explicit_llm_signal_date(signal_date, available_signal_dates or [])
@@ -456,16 +459,20 @@ def _explicit_llm_snapshot(
             "long_rank_map": {},
             "short_rank_map": {},
             "target_weights": {},
+            "raw_long_count": 0,
+            "raw_short_count": 0,
+            "audit_rows": [],
         }
 
     raw_longs = []
     raw_shorts = []
+    selected_long_count = 0
+    selected_short_count = 0
+    audit_rows = []
     execution_mode = None
 
     for ticker, df in all_data.items():
         if not _has_explicit_llm_columns(df):
-            continue
-        if not _is_membership_active(membership_lookup, ticker, resolved_signal_date):
             continue
 
         row = df[df["date"] == resolved_signal_date]
@@ -476,15 +483,46 @@ def _explicit_llm_snapshot(
         if int(row.get("llm_selected", 0)) != 1:
             continue
 
-        prepared = prepared_ticker_data.get(ticker)
-        price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
-        if not has_min_trade_price(price):
+        side = str(row.get("llm_side", "")).upper()
+        if side == "LONG":
+            selected_long_count += 1
+        elif side == "SHORT":
+            selected_short_count += 1
+
+        audit_row = {
+            "signal_date": resolved_signal_date,
+            "trade_date": trade_date,
+            "ticker": ticker,
+            "side": side,
+            "llm_selected": 1,
+            "survived_to_execution": False,
+            "drop_reason": "",
+        }
+
+        if not _is_membership_active(membership_lookup, ticker, resolved_signal_date):
+            audit_row["drop_reason"] = "not_russell_member"
+            audit_rows.append(audit_row)
             continue
 
-        side = str(row.get("llm_side", "")).upper()
+        prepared = prepared_ticker_data.get(ticker)
+        price = _lookup_ffill_price(prepared, trade_date) if prepared is not None else np.nan
+        if pd.isna(price):
+            audit_row["drop_reason"] = "missing_trade_price"
+            audit_rows.append(audit_row)
+            continue
+        if not has_min_trade_price(price):
+            audit_row["drop_reason"] = "below_min_price"
+            audit_row["trade_price"] = float(price)
+            audit_rows.append(audit_row)
+            continue
+
         weight_exec = abs(float(row.get("llm_weight_exec", 0.0)))
         score = row.get(f"base_{score_type}", row.get(score_type, np.nan))
         execution_mode = execution_mode or str(row.get("llm_execution_mode", "equal_weight"))
+        audit_row["survived_to_execution"] = True
+        audit_row["drop_reason"] = "survived_to_execution"
+        audit_row["trade_price"] = float(price)
+        audit_rows.append(audit_row)
 
         payload = {
             "ticker": ticker,
@@ -516,8 +554,21 @@ def _explicit_llm_snapshot(
     short_rank_map = {ticker: idx + 1 for idx, ticker in enumerate(short_candidates)}
 
     target_weights = {}
+    if llm_missing_policy == "fail_if_incomplete" and (
+        len(sorted_longs) < selected_long_count or len(sorted_shorts) < selected_short_count
+    ):
+        raise RuntimeError(
+            "Explicit LLM book incomplete after execution filters: "
+            f"{len(sorted_longs)}/{selected_long_count} longs and "
+            f"{len(sorted_shorts)}/{selected_short_count} shorts survived"
+        )
     if long_candidates and short_candidates:
-        if execution_mode == "llm_weighted":
+        if llm_missing_policy == "cash_missing":
+            for item in sorted_longs:
+                target_weights[item["ticker"]] = item["weight_exec"]
+            for item in sorted_shorts:
+                target_weights[item["ticker"]] = -item["weight_exec"]
+        elif execution_mode == "llm_weighted":
             long_total = sum(item["weight_exec"] for item in sorted_longs)
             short_total = sum(item["weight_exec"] for item in sorted_shorts)
             if long_total > 0 and short_total > 0:
@@ -539,6 +590,9 @@ def _explicit_llm_snapshot(
         "long_rank_map": long_rank_map,
         "short_rank_map": short_rank_map,
         "target_weights": target_weights,
+        "raw_long_count": selected_long_count,
+        "raw_short_count": selected_short_count,
+        "audit_rows": audit_rows,
     }
 
 
@@ -1214,6 +1268,7 @@ def _empty_portfolio_result():
         "trade_log_df": pd.DataFrame(),
         "holdings_log_df": pd.DataFrame(),
         "portfolio_selections_df": pd.DataFrame(),
+        "llm_selection_audit_df": pd.DataFrame(),
     }
 
 
@@ -1298,6 +1353,7 @@ def _build_factor_portfolio_periodic_static(
     trade_records = []
     holdings_records = []
     review_snapshots = []
+    llm_selection_audit_records = []
 
     print(f"\n📊 Building factor portfolio...")
     print(f"   Book sizing: {config.describe_book_sizing()}")
@@ -1413,8 +1469,10 @@ def _build_factor_portfolio_periodic_static(
                 prepared_ticker_data,
                 available_signal_dates=explicit_llm_signal_dates,
                 membership_lookup=membership_lookup,
+                llm_missing_policy=LLM_MISSING_POLICY,
             )
             target_weights_raw = candidate_info["target_weights"]
+            llm_selection_audit_records.extend(candidate_info.get("audit_rows", []))
             target_longs = [ticker for ticker, weight in target_weights_raw.items() if weight > 0]
             target_shorts = [ticker for ticker, weight in target_weights_raw.items() if weight < 0]
             target_long_n = len(target_longs)
@@ -1723,6 +1781,7 @@ def _build_factor_portfolio_periodic_static(
         "trade_log_df": pd.DataFrame(trade_records),
         "holdings_log_df": pd.DataFrame(holdings_records),
         "portfolio_selections_df": portfolio_selections_df,
+        "llm_selection_audit_df": pd.DataFrame(llm_selection_audit_records),
     }
 
 def build_factor_portfolio(
@@ -1800,6 +1859,7 @@ def build_factor_portfolio(
     trade_records = []
     holdings_records = []
     review_snapshots = []
+    llm_selection_audit_records = []
 
     print(f"\n📊 Building factor portfolio...")
     print(f"   Book sizing: {config.describe_book_sizing()}")
@@ -1951,8 +2011,10 @@ def build_factor_portfolio(
                     prepared_ticker_data,
                     available_signal_dates=explicit_llm_signal_dates,
                     membership_lookup=membership_lookup,
+                    llm_missing_policy=LLM_MISSING_POLICY,
                 )
                 target_weights_raw = candidate_info["target_weights"]
+                llm_selection_audit_records.extend(candidate_info.get("audit_rows", []))
                 target_longs = [ticker for ticker, weight in target_weights_raw.items() if weight > 0]
                 target_shorts = [ticker for ticker, weight in target_weights_raw.items() if weight < 0]
                 target_long_n = len(target_longs)
@@ -2248,6 +2310,7 @@ def build_factor_portfolio(
         "trade_log_df": trade_log_df,
         "holdings_log_df": holdings_log_df,
         "portfolio_selections_df": portfolio_selections_df,
+        "llm_selection_audit_df": pd.DataFrame(llm_selection_audit_records),
     }
 
 
@@ -3988,6 +4051,7 @@ def run_backtest(
     trade_log_df = portfolio_result["trade_log_df"]
     holdings_log_df = portfolio_result["holdings_log_df"]
     portfolio_selections_df = portfolio_result["portfolio_selections_df"]
+    llm_selection_audit_df = portfolio_result.get("llm_selection_audit_df", pd.DataFrame())
     review_signal_dates = _review_signal_dates(review_log_df)
 
     pnl_df, metrics = compute_metrics(
@@ -4018,6 +4082,8 @@ def run_backtest(
     review_log_df.to_csv(subdir / "review_log.csv", index=False)
     trade_log_df.to_csv(subdir / "trade_log.csv", index=False)
     holdings_log_df.to_csv(subdir / "holdings_log.csv", index=False)
+    if not llm_selection_audit_df.empty:
+        llm_selection_audit_df.to_csv(subdir / "llm_selection_audit.csv", index=False)
     print(f"   \u2713 CSVs saved \u2192 {subdir}")
     
     if skip_plots:
@@ -4076,7 +4142,7 @@ def main():
         # Run 15-day horizon for date range + specific tickers
         python factor_backtest_engine.py 15 2023-01-01 2024-12-31 AAPL MSFT
     """
-    global FORWARD_DAYS, REBALANCE_DAYS, COMPOSITE_SCORES_DIR, TOP_N, BOTTOM_N, SCORE_TYPES, COST_RATE
+    global FORWARD_DAYS, REBALANCE_DAYS, COMPOSITE_SCORES_DIR, TOP_N, BOTTOM_N, SCORE_TYPES, COST_RATE, LLM_MISSING_POLICY
     
     # Parse command-line arguments
     forward_days = None
@@ -4100,6 +4166,7 @@ def main():
     candidate_pool_mode = "raw"
     candidate_top_n_magnitude_per_side = 60
     candidate_direction_threshold = 5.0
+    llm_missing_policy = LLM_MISSING_POLICY
     top_n = TOP_N
     bottom_n = BOTTOM_N
     score_types = list(SCORE_TYPES)
@@ -4142,6 +4209,7 @@ def main():
             float,
             candidate_direction_threshold,
         )
+        llm_missing_policy, argv = _pop_flag(argv, "--llm-missing-policy", str, llm_missing_policy)
         regime_intervals["normal"], argv = _pop_flag(argv, "--review-normal-days", int, regime_intervals["normal"])
         regime_intervals["grind_up"], argv = _pop_flag(argv, "--review-grind-up-days", int, regime_intervals["grind_up"])
         regime_intervals["slow_bleed"], argv = _pop_flag(argv, "--review-slow-bleed-days", int, regime_intervals["slow_bleed"])
@@ -4224,10 +4292,17 @@ def main():
     if candidate_pool_mode not in {"raw", "llm_mirror", "llm_mirror_fill_raw"}:
         print(f"❌ Unsupported candidate pool mode: {candidate_pool_mode}")
         return
+    if llm_missing_policy not in LLM_MISSING_POLICIES:
+        print(
+            "❌ Unsupported --llm-missing-policy: "
+            f"{llm_missing_policy}. Choose one of: {', '.join(sorted(LLM_MISSING_POLICIES))}"
+        )
+        return
     TOP_N = top_n
     BOTTOM_N = bottom_n
     SCORE_TYPES = list(score_types)
     COST_RATE = cost_bps / 10000.0
+    LLM_MISSING_POLICY = llm_missing_policy
     static_review_days = review_days_override if review_days_override is not None else REBALANCE_DAYS
     if min_weight_delta is None and hysteresis_mode == "combined":
         min_weight_delta = 0.5 / top_n
@@ -4280,6 +4355,7 @@ def main():
     print(f"Weighting Mode: {weighting_mode}")
     print(f"Book Sizing Mode: {book_sizing_mode}")
     print(f"Transaction Cost: {cost_bps:g} bps one-way")
+    print(f"LLM Missing Policy: {LLM_MISSING_POLICY}")
     print(f"Periodic Static: {'enabled' if periodic_static else 'disabled'}")
     print(f"Min entry price: > ${MIN_TRADE_PRICE:.2f}")
     print(f"Score Types: {', '.join(score_types)}")
@@ -4393,6 +4469,7 @@ def main():
         "output_dir": str(OUTPUT_DIR),
         "skip_plots": bool(skip_plots),
         "periodic_static": bool(periodic_static),
+        "llm_missing_policy": LLM_MISSING_POLICY,
         "ticker_filter": list(ticker_filter) if ticker_filter else [],
         "review_policy": {
             "mode": review_mode,

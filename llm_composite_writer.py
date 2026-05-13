@@ -117,12 +117,26 @@ def write_llm_composites(
 
     # Build a map: {ticker: {date: execution metadata}} from LLM decisions
     llm_decisions: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    selected_rows = []
 
     for date_str, portfolio in portfolios.items():
         if portfolio.get("llm_source") != "llm":
             print(f"❌ Non-LLM portfolio found in cache for {date_str}; rebuild cache.")
             sys.exit(1)
         execution_mode = portfolio.get("execution_mode", metadata.get("execution_mode", "equal_weight"))
+        for side, basket_key in (("LONG", "long_basket"), ("SHORT", "short_basket")):
+            for entry in portfolio.get(basket_key, []):
+                ticker = entry.get("ticker", "").upper()
+                if ticker:
+                    selected_rows.append(
+                        {
+                            "date": date_str,
+                            "ticker": ticker,
+                            "side": side,
+                            "weight_exec": abs(float(entry.get("weight_exec", entry.get("weight", 0)))),
+                        }
+                    )
+
         for entry in portfolio.get("long_basket", []):
             ticker = entry.get("ticker", "").upper()
             weight_raw = abs(float(entry.get("weight_raw", entry.get("weight", 0))))
@@ -159,6 +173,11 @@ def write_llm_composites(
     written = 0
     skipped = 0
     expected = 0
+
+    coverage_rows = []
+    selected_by_ticker: Dict[str, list[dict[str, Any]]] = {}
+    for selected in selected_rows:
+        selected_by_ticker.setdefault(selected["ticker"], []).append(selected)
 
     for csv_file in composite_files:
         try:
@@ -206,6 +225,34 @@ def write_llm_composites(
         out_file = staging_dir / csv_file.name
         df.to_csv(out_file, index=False)
         written += 1
+
+        selected_for_ticker = selected_by_ticker.pop(ticker, [])
+        if selected_for_ticker:
+            available_date_keys = set(df["date"].dt.strftime("%Y-%m-%d"))
+            for selected in selected_for_ticker:
+                has_composite_row = selected["date"] in available_date_keys
+                coverage_rows.append(
+                    {
+                        **selected,
+                        "has_composite_file": True,
+                        "has_composite_row": has_composite_row,
+                        "coverage_reason": "covered" if has_composite_row else "missing_composite_row",
+                    }
+                )
+
+    for selected_for_ticker in selected_by_ticker.values():
+        for selected in selected_for_ticker:
+            coverage_rows.append(
+                {
+                    **selected,
+                    "has_composite_file": False,
+                    "has_composite_row": False,
+                    "coverage_reason": "missing_composite_file",
+                }
+            )
+
+    if coverage_rows:
+        pd.DataFrame(coverage_rows).to_csv(staging_dir / "llm_composite_coverage.csv", index=False)
 
     if written == 0:
         raise RuntimeError(

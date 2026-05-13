@@ -55,6 +55,7 @@ class BenchmarkConfig:
     cadence_mode: str = DEFAULT_CADENCE_MODE
     signal_lookback_days: int = DEFAULT_SIGNAL_LOOKBACK_DAYS
     rebalance_days: int = DEFAULT_REBALANCE_DAYS
+    rebalance_anchor_date: pd.Timestamp | None = None
     holding_days: int | None = None
     positions_per_side: int | None = None
     min_trade_price: float = MIN_TRADE_PRICE
@@ -113,6 +114,7 @@ class MarketFrames:
 class BenchmarkArtifacts:
     weekly_returns: pd.DataFrame
     signal_checks: pd.DataFrame
+    portfolio_selections: pd.DataFrame
     headline_metrics: pd.DataFrame
     yearly_returns: pd.DataFrame
     strategy_summary: pd.DataFrame
@@ -158,6 +160,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_REBALANCE_DAYS,
         help="Trading-day rebalance interval in trading-day mode (default: 5)",
+    )
+    parser.add_argument(
+        "--rebalance-anchor-date",
+        default=None,
+        help="Optional first signal date for trading-day cadence, e.g. 2000-01-03",
     )
     parser.add_argument(
         "--holding-days",
@@ -418,7 +425,7 @@ def run_weekly_strategy(
     market_frames: MarketFrames,
     membership_lookup: MembershipLookup,
     config: BenchmarkConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     close_df = market_frames.close_df
     open_df = market_frames.open_df
     unadj_close_df = market_frames.unadj_close_df
@@ -434,6 +441,7 @@ def run_weekly_strategy(
 
     results: list[dict[str, object]] = []
     signal_rows: list[dict[str, object]] = []
+    selection_rows: list[dict[str, object]] = []
     prev_long_set: set[str] = set()
     prev_short_set: set[str] = set()
 
@@ -547,6 +555,32 @@ def run_weekly_strategy(
                     }
                 )
 
+        for side, tickers, mask in (
+            ("LONG", long_tickers, long_mask),
+            ("SHORT", short_tickers, short_mask),
+        ):
+            selected_positions = np.where(mask)[0]
+            side_weight = 1.0 / len(selected_positions) if len(selected_positions) else np.nan
+            for rank, pos in enumerate(selected_positions, start=1):
+                selection_rows.append(
+                    {
+                        "rebalance_date": this_fri,
+                        "signal_date": this_fri,
+                        "entry_date": this_fri,
+                        "exit_date": next_fri,
+                        "ticker": valid[pos],
+                        "position_type": side,
+                        "rank": rank,
+                        "score": signal[pos],
+                        "trail_return_pct": trail[pos] * 100.0,
+                        "realized_return_pct": fwd_c2c[pos] * 100.0,
+                        "realized_c2c_return_pct": fwd_c2c[pos] * 100.0,
+                        "realized_o2o_return_pct": fwd_o2o[pos] * 100.0,
+                        "weight": side_weight,
+                        "decile": deciles[pos],
+                    }
+                )
+
         if idx % 200 == 0:
             print(f"  {idx}/{len(fridays)} ({this_fri.date()}) universe={len(valid)}")
 
@@ -557,14 +591,15 @@ def run_weekly_strategy(
     weekly_returns["date"] = pd.to_datetime(weekly_returns["date"])
     weekly_returns = weekly_returns.set_index("date").sort_index()
     signal_checks = pd.DataFrame(signal_rows)
-    return weekly_returns, signal_checks
+    portfolio_selections = pd.DataFrame(selection_rows)
+    return weekly_returns, signal_checks, portfolio_selections
 
 
 def run_periodic_strategy(
     market_frames: MarketFrames,
     membership_lookup: MembershipLookup,
     config: BenchmarkConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     close_df = market_frames.close_df
     open_df = market_frames.open_df
     unadj_close_df = market_frames.unadj_close_df
@@ -585,11 +620,24 @@ def run_periodic_strategy(
 
     results: list[dict[str, object]] = []
     signal_rows: list[dict[str, object]] = []
+    selection_rows: list[dict[str, object]] = []
     prev_long_set: set[str] = set()
     prev_short_set: set[str] = set()
 
     max_signal_idx = len(trading_dates) - holding_days - 1
-    for idx in range(lookback_days, max_signal_idx + 1, rebalance_days):
+    first_signal_idx = lookback_days
+    if config.rebalance_anchor_date is not None:
+        anchor = pd.Timestamp(config.rebalance_anchor_date)
+        first_signal_idx = int(trading_dates.searchsorted(anchor))
+        if first_signal_idx >= len(trading_dates) or pd.Timestamp(trading_dates[first_signal_idx]) != anchor:
+            raise ValueError(f"rebalance_anchor_date {anchor.date()} is not a trading date")
+        if first_signal_idx < lookback_days:
+            raise ValueError(
+                f"rebalance_anchor_date {anchor.date()} does not have "
+                f"{lookback_days} prior trading days for the signal lookback"
+            )
+
+    for idx in range(first_signal_idx, max_signal_idx + 1, rebalance_days):
         start_date = pd.Timestamp(trading_dates[idx - lookback_days])
         signal_date = pd.Timestamp(trading_dates[idx])
         exit_date = pd.Timestamp(trading_dates[idx + holding_days])
@@ -699,6 +747,32 @@ def run_periodic_strategy(
                     }
                 )
 
+        for side, tickers, mask in (
+            ("LONG", long_tickers, long_mask),
+            ("SHORT", short_tickers, short_mask),
+        ):
+            selected_positions = np.where(mask)[0]
+            side_weight = 1.0 / len(selected_positions) if len(selected_positions) else np.nan
+            for rank, pos in enumerate(selected_positions, start=1):
+                selection_rows.append(
+                    {
+                        "rebalance_date": signal_date,
+                        "signal_date": signal_date,
+                        "entry_date": signal_date,
+                        "exit_date": exit_date,
+                        "ticker": valid[pos],
+                        "position_type": side,
+                        "rank": rank,
+                        "score": signal[pos],
+                        "trail_return_pct": trail[pos] * 100.0,
+                        "realized_return_pct": fwd_c2c[pos] * 100.0,
+                        "realized_c2c_return_pct": fwd_c2c[pos] * 100.0,
+                        "realized_o2o_return_pct": fwd_o2o[pos] * 100.0,
+                        "weight": side_weight,
+                        "decile": deciles[pos],
+                    }
+                )
+
     periodic_returns = pd.DataFrame(results)
     if periodic_returns.empty:
         raise RuntimeError("No periodic results were produced. Check the date range, cadence, membership file, or filters.")
@@ -706,7 +780,8 @@ def run_periodic_strategy(
     periodic_returns["date"] = pd.to_datetime(periodic_returns["date"])
     periodic_returns = periodic_returns.set_index("date").sort_index()
     signal_checks = pd.DataFrame(signal_rows)
-    return periodic_returns, signal_checks
+    portfolio_selections = pd.DataFrame(selection_rows)
+    return periodic_returns, signal_checks, portfolio_selections
 
 
 def add_cost_overlays(weekly_returns: pd.DataFrame, cost_bps_levels: tuple[float, ...]) -> pd.DataFrame:
@@ -1234,6 +1309,7 @@ def save_artifacts(
     output_dir.mkdir(parents=True, exist_ok=True)
     artifacts.weekly_returns.to_csv(output_dir / "weekly_returns.csv")
     artifacts.signal_checks.to_csv(output_dir / "signal_checks.csv", index=False)
+    artifacts.portfolio_selections.to_csv(output_dir / "portfolio_selections.csv", index=False)
     artifacts.headline_metrics.to_csv(output_dir / "headline_metrics.csv", index=False)
     artifacts.yearly_returns.to_csv(output_dir / "yearly_returns.csv")
     artifacts.strategy_summary.to_csv(output_dir / "strategy_summary.csv", index=False)
@@ -1247,6 +1323,7 @@ def save_artifacts(
     print("\nSaved outputs:")
     print(f"  {output_dir / 'weekly_returns.csv'}")
     print(f"  {output_dir / 'signal_checks.csv'}")
+    print(f"  {output_dir / 'portfolio_selections.csv'}")
     print(f"  {output_dir / 'headline_metrics.csv'}")
     print(f"  {output_dir / 'yearly_returns.csv'}")
     print(f"  {output_dir / 'strategy_summary.csv'}")
@@ -1270,9 +1347,17 @@ def run_benchmark(config: BenchmarkConfig, histories: dict[str, pd.DataFrame] | 
     gc.collect()
 
     if config.cadence_mode == "weekly_friday":
-        weekly_returns, signal_checks = run_weekly_strategy(market_frames, membership_lookup, config)
+        weekly_returns, signal_checks, portfolio_selections = run_weekly_strategy(
+            market_frames,
+            membership_lookup,
+            config,
+        )
     else:
-        weekly_returns, signal_checks = run_periodic_strategy(market_frames, membership_lookup, config)
+        weekly_returns, signal_checks, portfolio_selections = run_periodic_strategy(
+            market_frames,
+            membership_lookup,
+            config,
+        )
     weekly_returns = add_cost_overlays(weekly_returns, config.cost_bps_levels)
     headline_metrics = build_headline_metrics(weekly_returns, periods_per_year=config.periods_per_year())
     yearly_returns = build_yearly_returns(weekly_returns)
@@ -1281,6 +1366,7 @@ def run_benchmark(config: BenchmarkConfig, histories: dict[str, pd.DataFrame] | 
     return BenchmarkArtifacts(
         weekly_returns=weekly_returns,
         signal_checks=signal_checks,
+        portfolio_selections=portfolio_selections,
         headline_metrics=headline_metrics,
         yearly_returns=yearly_returns,
         strategy_summary=strategy_summary,
@@ -1299,6 +1385,9 @@ def main(argv: list[str] | None = None) -> BenchmarkArtifacts:
         cadence_mode=args.cadence_mode,
         signal_lookback_days=args.signal_lookback_days,
         rebalance_days=args.rebalance_days,
+        rebalance_anchor_date=(
+            pd.Timestamp(args.rebalance_anchor_date) if args.rebalance_anchor_date else None
+        ),
         holding_days=args.holding_days,
         positions_per_side=args.positions_per_side,
     )
@@ -1311,6 +1400,8 @@ def main(argv: list[str] | None = None) -> BenchmarkArtifacts:
     print(f"Membership file: {config.membership_path}")
     print(f"Cost levels    : {', '.join(f'{bps:g}bps' for bps in config.cost_bps_levels)}")
     print(f"Cadence mode   : {config.cadence_label()}")
+    if config.rebalance_anchor_date is not None:
+        print(f"Rebalance anchor: {config.rebalance_anchor_date.date()}")
     print(
         "Selection mode : "
         + (

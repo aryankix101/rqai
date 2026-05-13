@@ -137,6 +137,76 @@ class CandidateSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["short_candidates"], ["AAA"])
 
 
+class ExplicitLlmSnapshotTests(unittest.TestCase):
+    def _explicit_row(self, date, side, price, weight=0.02):
+        return {
+            "date": pd.Timestamp(date),
+            "adj_close": price,
+            "direction_score": 1.0 if side == "LONG" else -1.0,
+            "base_direction_score": 1.0 if side == "LONG" else -1.0,
+            "magnitude_score": 50.0,
+            "base_magnitude_score": 50.0,
+            "llm_selected": 1,
+            "llm_side": side,
+            "llm_weight_raw": weight,
+            "llm_weight_exec": weight,
+            "llm_source": "llm",
+            "llm_execution_mode": "equal_weight",
+        }
+
+    def test_cash_missing_preserves_cache_weights_and_audits_drop(self):
+        signal_date = pd.Timestamp("2024-01-05")
+        all_data = {
+            "AAA": pd.DataFrame([self._explicit_row(signal_date, "LONG", 10.0, 0.02)]),
+            "LOW": pd.DataFrame([self._explicit_row(signal_date, "LONG", 4.0, 0.02)]),
+            "BBB": pd.DataFrame([self._explicit_row(signal_date, "SHORT", 20.0, 0.02)]),
+        }
+        prepared = {
+            ticker: fbe._prepare_ticker_data(df, "direction_score")
+            for ticker, df in all_data.items()
+        }
+
+        snapshot = fbe._explicit_llm_snapshot(
+            all_data,
+            "direction_score",
+            signal_date,
+            signal_date,
+            prepared,
+            available_signal_dates=[signal_date],
+            llm_missing_policy="cash_missing",
+        )
+
+        self.assertEqual(snapshot["raw_long_count"], 2)
+        self.assertEqual(snapshot["raw_short_count"], 1)
+        self.assertEqual(snapshot["target_weights"], {"AAA": 0.02, "BBB": -0.02})
+        reasons = {(row["ticker"], row["drop_reason"]) for row in snapshot["audit_rows"]}
+        self.assertIn(("LOW", "below_min_price"), reasons)
+        self.assertIn(("AAA", "survived_to_execution"), reasons)
+
+    def test_fail_if_incomplete_raises_when_selected_name_drops(self):
+        signal_date = pd.Timestamp("2024-01-05")
+        all_data = {
+            "AAA": pd.DataFrame([self._explicit_row(signal_date, "LONG", 10.0)]),
+            "LOW": pd.DataFrame([self._explicit_row(signal_date, "LONG", 4.0)]),
+            "BBB": pd.DataFrame([self._explicit_row(signal_date, "SHORT", 20.0)]),
+        }
+        prepared = {
+            ticker: fbe._prepare_ticker_data(df, "direction_score")
+            for ticker, df in all_data.items()
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "Explicit LLM book incomplete"):
+            fbe._explicit_llm_snapshot(
+                all_data,
+                "direction_score",
+                signal_date,
+                signal_date,
+                prepared,
+                available_signal_dates=[signal_date],
+                llm_missing_policy="fail_if_incomplete",
+            )
+
+
 class ReviewEligibilityTests(unittest.TestCase):
     def test_target_weight_filter_forces_out_inactive_or_untradable_names(self):
         signal_date = pd.Timestamp("2024-01-05")

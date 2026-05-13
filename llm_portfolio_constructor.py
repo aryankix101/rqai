@@ -21,13 +21,19 @@ import os
 import sys
 import tempfile
 import time
+from bisect import bisect_right
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import numpy as np
 import pandas as pd
 
-from data_source_config import DATASET_VERSION, DEFAULT_COMPOSITE_SCORES_DIR, SPY_SIGNAL_DATA_PATH
+from data_source_config import (
+    DATASET_VERSION,
+    DEFAULT_COMPOSITE_SCORES_DIR,
+    RUSSELL_MEMBERSHIP_PATH,
+    SPY_SIGNAL_DATA_PATH,
+)
 from indicator_feature_schema import (
     CANONICAL_INDICATOR_FEATURES,
     extract_canonical_indicator_features,
@@ -50,7 +56,7 @@ COMPOSITE_SCORES_DIR = DEFAULT_COMPOSITE_SCORES_DIR
 SPY_DATA_PATH = SPY_SIGNAL_DATA_PATH
 CACHE_DIR = Path("backtest_results/llm_portfolio_cache")
 CACHE_SCHEMA_VERSION = 3
-PROMPT_FORMAT_VERSION = "two_stage_signal_overlay_v5_exact_book_compact_trace"
+PROMPT_FORMAT_VERSION = "two_stage_signal_overlay_v6_r1000_prefilter_compact_trace"
 DEFAULT_MODEL = technical_llm.DEFAULT_MODEL
 DEFAULT_LLM_STRATEGY = "deterministic"
 MEAN_REVERSION_TRAIL_LOOKBACK_DAYS = 5
@@ -154,10 +160,89 @@ def identify_regime(spy_df: pd.DataFrame, date: pd.Timestamp) -> str:
     return "normal"
 
 
+def _membership_flag_is_active(value) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value) != 0.0
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def _normalize_membership_symbol(symbol) -> str:
+    if pd.isna(symbol):
+        return ""
+    return str(symbol).strip().upper().split("-", 1)[0]
+
+
+def load_russell_membership_lookup(path=RUSSELL_MEMBERSHIP_PATH) -> Dict[str, Any]:
+    """Load point-in-time Russell membership for prompt-universe prefiltering."""
+    membership_path = Path(path).expanduser()
+    if not membership_path.exists():
+        raise FileNotFoundError(f"Russell membership file not found: {membership_path}")
+
+    if membership_path.suffix.lower() == ".parquet":
+        membership_df = pd.read_parquet(membership_path)
+    else:
+        membership_df = pd.read_csv(membership_path, parse_dates=["date"])
+
+    required_cols = {"date", "symbol"}
+    missing_cols = required_cols - set(membership_df.columns)
+    if missing_cols:
+        raise ValueError(
+            f"Russell membership file missing required columns: {sorted(missing_cols)}"
+        )
+
+    membership_df = membership_df.copy()
+    membership_df["date"] = pd.to_datetime(membership_df["date"], errors="coerce")
+    membership_df["symbol"] = membership_df["symbol"].map(_normalize_membership_symbol)
+    membership_df = membership_df.dropna(subset=["date"])
+    membership_df = membership_df[membership_df["symbol"] != ""]
+    if "in_r1000" in membership_df.columns:
+        membership_df = membership_df[membership_df["in_r1000"].map(_membership_flag_is_active)]
+    if membership_df.empty:
+        raise ValueError(f"Russell membership file has no active rows: {membership_path}")
+
+    grouped = (
+        membership_df[["date", "symbol"]]
+        .drop_duplicates()
+        .groupby("date")["symbol"]
+        .agg(lambda values: frozenset(values))
+    )
+    dates = grouped.index.to_numpy(dtype="datetime64[ns]").view("i8")
+    order = np.argsort(dates)
+    dates = dates[order]
+    universes = tuple(grouped.iloc[int(idx)] for idx in order)
+    return {
+        "dates_ns": dates,
+        "universes": universes,
+        "path": str(membership_path),
+    }
+
+
+def _is_russell_member_on_or_before(
+    membership_lookup: Optional[Dict[str, Any]],
+    ticker: str,
+    as_of_date: pd.Timestamp,
+) -> bool:
+    if membership_lookup is None:
+        return True
+    dates_ns = membership_lookup.get("dates_ns")
+    universes = membership_lookup.get("universes")
+    if dates_ns is None or len(dates_ns) == 0 or not universes:
+        return False
+    idx = bisect_right(dates_ns, pd.Timestamp(as_of_date).value) - 1
+    if idx < 0:
+        return False
+    return _normalize_membership_symbol(ticker) in universes[idx]
+
+
 def load_signal_data_preloaded(
     composite_dfs: Dict[str, pd.DataFrame],
     date: pd.Timestamp,
     strategy_style: str = DEFAULT_LLM_STRATEGY,
+    membership_lookup: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Build universe dict from pre-loaded composite DataFrames.
 
@@ -179,6 +264,8 @@ def load_signal_data_preloaded(
     universe = {}
     for ticker, df in composite_dfs.items():
         if ticker in EXCLUDED_TICKERS:
+            continue
+        if not _is_russell_member_on_or_before(membership_lookup, ticker, date):
             continue
 
         row_positions = np.flatnonzero((df["date"] == date).to_numpy())
@@ -236,10 +323,15 @@ def _minimum_required_universe_size(
     strategy_style: str,
     effective_top_n: int,
     target_positions_per_side: Optional[int],
+    mean_reversion_candidate_mode: str = "fixed_top_n",
 ) -> int:
     minimum = 60
     normalized = str(strategy_style or "").strip().lower()
     if normalized == "mean_reversion":
+        if str(mean_reversion_candidate_mode or "").strip().lower() == "decile":
+            if target_positions_per_side is not None:
+                return max(minimum, int(target_positions_per_side) * 10)
+            return minimum
         required_short_candidates = (
             int(target_positions_per_side)
             if target_positions_per_side is not None
@@ -377,6 +469,8 @@ def build_cache_filename(
     model: Optional[str] = None,
     temperature: Optional[float] = None,
     top_n_magnitude: Optional[int] = None,
+    mean_reversion_candidate_mode: str = "fixed_top_n",
+    compact_output: bool = False,
 ) -> str:
     """Build a cache filename that preserves prompt and execution variants."""
     execution_mode = "equal_weight" if use_equal_weight else "llm_weighted"
@@ -390,11 +484,15 @@ def build_cache_filename(
     if enable_loss_memory:
         loss_memory_suffix = f"_lossmem_k{int(loss_memory_top_k)}_t{int(loss_memory_max_targets_per_side)}"
     trace_suffix = "_trace" if log_llm_trace else ""
-    config_suffix = ""
+    config_suffix = "_r1000"
     if model is not None:
         config_suffix += f"_mdl-{_sanitize_cache_token(model)}"
     if top_n_magnitude is not None:
         config_suffix += f"_top{int(top_n_magnitude)}"
+    if str(strategy_style or "").strip().lower() == "mean_reversion":
+        config_suffix += f"_cand-{_sanitize_cache_token(mean_reversion_candidate_mode)}"
+    if compact_output:
+        config_suffix += "_compact"
     if temperature is not None:
         config_suffix += f"_temp{_format_cache_float_token(temperature)}"
     return (
@@ -413,10 +511,12 @@ def _cache_is_compatible(
     temperature: float,
     top_n_magnitude: int,
     target_positions_per_side: Optional[int],
-    enable_loss_memory: bool,
-    loss_memory_top_k: int,
-    loss_memory_max_targets_per_side: int,
-    log_llm_trace: bool,
+    mean_reversion_candidate_mode: str = "fixed_top_n",
+    compact_output: bool = False,
+    enable_loss_memory: bool = False,
+    loss_memory_top_k: int = 3,
+    loss_memory_max_targets_per_side: int = 4,
+    log_llm_trace: bool = False,
 ) -> bool:
     """Reject legacy or fallback-generated caches."""
     metadata = cache.get("metadata", {})
@@ -446,6 +546,11 @@ def _cache_is_compatible(
         return False
     if metadata.get("target_positions_per_side") != target_positions_per_side:
         return False
+    if strategy_style == "mean_reversion":
+        if metadata.get("mean_reversion_candidate_mode", "fixed_top_n") != mean_reversion_candidate_mode:
+            return False
+        if bool(metadata.get("compact_output", False)) != bool(compact_output):
+            return False
     if bool(metadata.get("log_llm_trace", False)) != bool(log_llm_trace):
         return False
     if bool(metadata.get("loss_memory_enabled", False)) != bool(enable_loss_memory):
@@ -459,6 +564,10 @@ def _cache_is_compatible(
     if metadata.get("source_dataset") != DATASET_VERSION:
         return False
     if metadata.get("composite_scores_dir") != str(COMPOSITE_SCORES_DIR):
+        return False
+    if metadata.get("membership_gating_enabled") is not True:
+        return False
+    if metadata.get("membership_path") != str(RUSSELL_MEMBERSHIP_PATH):
         return False
 
     for portfolio in cache.get("portfolios", {}).values():
@@ -490,6 +599,8 @@ async def run_batch(
     turnover_aware: bool = False,
     strategy_style: str = DEFAULT_LLM_STRATEGY,
     target_positions_per_side: Optional[int] = None,
+    mean_reversion_candidate_mode: str = "fixed_top_n",
+    compact_output: bool = False,
     enable_loss_memory: bool = False,
     loss_memory_top_k: int = 3,
     loss_memory_max_targets_per_side: int = 4,
@@ -513,6 +624,16 @@ async def run_batch(
     target_positions_per_side = technical_llm.normalize_target_positions_per_side(
         target_positions_per_side
     )
+    mean_reversion_candidate_mode = str(mean_reversion_candidate_mode or "fixed_top_n").strip().lower()
+    if strategy_style == "mean_reversion":
+        valid_modes = getattr(llm_module, "MEAN_REVERSION_CANDIDATE_MODES", {"fixed_top_n"})
+        if mean_reversion_candidate_mode not in valid_modes:
+            raise ValueError(
+                f"mean_reversion_candidate_mode must be one of {sorted(valid_modes)}, "
+                f"got {mean_reversion_candidate_mode!r}"
+            )
+    else:
+        mean_reversion_candidate_mode = "fixed_top_n"
     effective_top_n = max(
         top_n_magnitude,
         technical_llm.max_positions_per_side(target_positions_per_side),
@@ -530,10 +651,14 @@ async def run_batch(
     print(f"Model: {model}  |  Temperature: {temperature_label}")
     print(f"Strategy style: {strategy_style}")
     print(f"Target positions per side: {target_positions_per_side or 'flex (5-30)'}")
-    print(f"Top-N ranked candidates shown to LLM: {effective_top_n}")
+    if strategy_style == "mean_reversion" and mean_reversion_candidate_mode == "decile":
+        print("Mean-reversion candidate mode: exact D1/D10 decile buckets")
+    else:
+        print(f"Top-N ranked candidates shown to LLM: {effective_top_n}")
     print(f"Min decision price: > ${MIN_TRADE_PRICE:.2f}")
     print(f"Execution mode: {'equal_weight' if use_equal_weight else 'llm_weighted'}")
     print(f"LLM prompt: {prompt_style_label(turnover_aware)}")
+    print(f"Compact LLM output: {'enabled' if compact_output else 'disabled'}")
     print(f"Prompt/response trace logging: {'enabled' if log_llm_trace else 'disabled'}")
     if enable_loss_memory:
         print(
@@ -559,6 +684,10 @@ async def run_batch(
         print("❌ No rebalance dates in the specified window")
         return
 
+    print("📋 Loading Russell membership gate...")
+    membership_lookup = load_russell_membership_lookup()
+    print(f"   ✓ Membership gating enabled: {membership_lookup['path']}\n")
+
     # Preload composite data
     composite_dfs = preload_all_data()
 
@@ -578,6 +707,8 @@ async def run_batch(
         model=model,
         temperature=temperature,
         top_n_magnitude=effective_top_n,
+        mean_reversion_candidate_mode=mean_reversion_candidate_mode,
+        compact_output=compact_output,
     )
     cache_path = CACHE_DIR / cache_filename
     execution_mode = "equal_weight" if use_equal_weight else "llm_weighted"
@@ -598,6 +729,8 @@ async def run_batch(
         temperature,
         effective_top_n,
         target_positions_per_side,
+        mean_reversion_candidate_mode,
+        compact_output,
         enable_loss_memory,
         loss_memory_top_k,
         loss_memory_max_targets_per_side,
@@ -617,6 +750,8 @@ async def run_batch(
         "model": model,
         "temperature": temperature,
         "top_n_magnitude": effective_top_n,
+        "mean_reversion_candidate_mode": mean_reversion_candidate_mode,
+        "compact_output": bool(compact_output),
         "target_positions_per_side": target_positions_per_side,
         "min_decision_price": MIN_TRADE_PRICE,
         "execution_mode": execution_mode,
@@ -633,6 +768,8 @@ async def run_batch(
         "llm_source_policy": "strict_llm_only",
         "source_dataset": DATASET_VERSION,
         "composite_scores_dir": str(COMPOSITE_SCORES_DIR),
+        "membership_gating_enabled": True,
+        "membership_path": membership_lookup["path"],
         "total_rebalance_dates": len(rebalance_dates),
     }
     cache.setdefault("failures", {})
@@ -675,6 +812,7 @@ async def run_batch(
             composite_dfs,
             pd.Timestamp(rebal_date),
             strategy_style=strategy_style,
+            membership_lookup=membership_lookup,
         )
         eligible_universe_size = len(universe)
         if str(strategy_style or "").strip().lower() == "mean_reversion":
@@ -683,6 +821,7 @@ async def run_batch(
             strategy_style,
             effective_top_n,
             target_positions_per_side,
+            mean_reversion_candidate_mode,
         )
 
         if eligible_universe_size < min_universe_size:
@@ -731,6 +870,10 @@ async def run_batch(
         # Call LLM
         try:
             t0 = time.time()
+            strategy_kwargs = {}
+            if strategy_style == "mean_reversion":
+                strategy_kwargs["candidate_mode"] = mean_reversion_candidate_mode
+                strategy_kwargs["compact_output"] = compact_output
             portfolio = await llm_module.construct_portfolio_from_universe(
                 universe=universe,
                 rebalance_date=date_str,
@@ -745,6 +888,7 @@ async def run_batch(
                 turnover_aware=turnover_aware,
                 loss_memory_context=loss_memory_context,
                 log_llm_trace=log_llm_trace,
+                **strategy_kwargs,
             )
             elapsed = time.time() - t0
 
@@ -822,6 +966,20 @@ def main():
         type=int,
         help="Exact number of long and short names the LLM should return each rebalance",
     )
+    parser.add_argument(
+        "--mean-reversion-candidate-mode",
+        choices=("fixed_top_n", "decile"),
+        default="fixed_top_n",
+        help=(
+            "Mean-reversion prompt candidate bucket mode: fixed_top_n shows --top-n names per side; "
+            "decile shows exact D1/D10 full-universe buckets"
+        ),
+    )
+    parser.add_argument(
+        "--compact-output",
+        action="store_true",
+        help="Ask compatible LLM strategy prompts to omit per-name rationales and return compact JSON",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"DeepSeek model name (default: {DEFAULT_MODEL})")
     parser.add_argument("--rate-limit", type=float, default=2.0, help="Delay between API calls in seconds")
     parser.add_argument("--equal-weight", action="store_true", help="Override LLM sizing and execute each leg equal-weighted")
@@ -876,6 +1034,8 @@ def main():
             use_equal_weight=args.equal_weight,
             strategy_style=args.strategy_style,
             target_positions_per_side=args.positions_per_side,
+            mean_reversion_candidate_mode=args.mean_reversion_candidate_mode,
+            compact_output=args.compact_output,
             turnover_aware=args.turnover_aware,
             enable_loss_memory=args.enable_loss_memory,
             loss_memory_top_k=args.loss_memory_top_k,
