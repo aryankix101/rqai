@@ -3,8 +3,10 @@ import unittest
 from mean_reversion_llm import (
     _build_mean_reversion_candidate_views,
     _format_universe_for_prompt,
+    _validate_signal_ranking_output,
     _validate_signal_stage_output,
     build_portfolio_system_prompt,
+    build_signal_ranking_system_prompt,
 )
 
 
@@ -65,6 +67,14 @@ class MeanReversionPromptTests(unittest.TestCase):
         self.assertIn("OVERBOUGHT SHORT CANDIDATES", prompt_body)
         self.assertIn("single-stage mean-reversion alpha discovery", prompt_body)
         self.assertIn("Trail5", prompt_body)
+        self.assertIn("VixPctl", prompt_body)
+        self.assertIn("VolImb", prompt_body)
+        self.assertIn("M2/M1", prompt_body)
+        self.assertIn("ATR", prompt_body)
+        self.assertIn("RV10", prompt_body)
+        self.assertIn("VAT_MA", prompt_body)
+        self.assertIn("D52WH", prompt_body)
+        self.assertIn("VATSlo", prompt_body)
         self.assertNotIn("MAGNITUDE DISTRIBUTION:", prompt_body)
         self.assertNotIn(" Dir ", prompt_body)
         self.assertNotIn(" Mag ", prompt_body)
@@ -357,6 +367,81 @@ class MeanReversionPromptTests(unittest.TestCase):
         )
         self.assertEqual(len(validated["long_candidates"]), 5)
         self.assertEqual(len(validated["short_candidates"]), 5)
+
+    def test_signal_ranking_prompt_excludes_portfolio_construction(self):
+        prompt = build_signal_ranking_system_prompt()
+        self.assertIn("confidence_score means", prompt)
+        self.assertIn("Do not construct a portfolio", prompt)
+        self.assertIn("not a position size", prompt)
+        self.assertIn("ticker", prompt)
+        self.assertIn("rank", prompt)
+        self.assertIn("confidence_score", prompt)
+
+    def test_signal_ranking_validation_requires_every_expected_ticker(self):
+        raw_output = {
+            "long_rankings": [
+                {"ticker": "AAA", "rank": 1, "confidence_score": 90},
+            ],
+            "short_rankings": [
+                {"ticker": "CCC", "rank": 1, "confidence_score": 80},
+                {"ticker": "DDD", "rank": 2, "confidence_score": 70},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "missing tickers"):
+            _validate_signal_ranking_output(
+                raw_output,
+                expected_long_tickers=["AAA", "BBB"],
+                expected_short_tickers=["CCC", "DDD"],
+            )
+
+    def test_signal_ranking_validation_rejects_invalid_ranks_and_confidence(self):
+        duplicate_rank = {
+            "long_rankings": [
+                {"ticker": "AAA", "rank": 1, "confidence_score": 90},
+                {"ticker": "BBB", "rank": 1, "confidence_score": 85},
+            ],
+            "short_rankings": [
+                {"ticker": "CCC", "rank": 1, "confidence_score": 80},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            _validate_signal_ranking_output(
+                duplicate_rank,
+                expected_long_tickers=["AAA", "BBB"],
+                expected_short_tickers=["CCC"],
+            )
+
+        bad_confidence = {
+            "long_rankings": [
+                {"ticker": "AAA", "rank": 1, "confidence_score": 101},
+            ],
+            "short_rankings": [
+                {"ticker": "CCC", "rank": 1, "confidence_score": 80},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "invalid confidence_score"):
+            _validate_signal_ranking_output(
+                bad_confidence,
+                expected_long_tickers=["AAA"],
+                expected_short_tickers=["CCC"],
+            )
+
+    def test_signal_ranking_validation_sorts_by_rank(self):
+        raw_output = {
+            "long_rankings": [
+                {"ticker": "BBB", "rank": 2, "confidence_score": 80},
+                {"ticker": "AAA", "rank": 1, "confidence_score": 90},
+            ],
+            "short_rankings": [
+                {"ticker": "CCC", "rank": 1, "confidence_score": 85},
+            ],
+        }
+        validated = _validate_signal_ranking_output(
+            raw_output,
+            expected_long_tickers=["AAA", "BBB"],
+            expected_short_tickers=["CCC"],
+        )
+        self.assertEqual([row["ticker"] for row in validated["long_rankings"]], ["AAA", "BBB"])
 
 
 if __name__ == "__main__":

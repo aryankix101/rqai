@@ -13,7 +13,7 @@ The turnover overlay and deterministic weighting layers are intentionally
 shared with the deterministic LLM pipeline so we only change the alpha slate.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import httpx
 import numpy as np
@@ -46,6 +46,8 @@ TRAIL_LOOKBACK_DAYS = 5
 TRAIL_RETURN_KEY = f"trail_return_{TRAIL_LOOKBACK_DAYS}d"
 MEAN_REVERSION_CANDIDATE_MODES = {"fixed_top_n", "decile"}
 
+SIGNAL_RANKING_SCHEMA_VERSION = 1
+
 
 MEAN_REVERSION_SIGNAL_STAGE_SYSTEM_PROMPT_TEMPLATE = """
 MEAN REVERSION DISCOVERY STAGE
@@ -70,8 +72,8 @@ ALPHA RULES:
 
 2. Broad-universe discipline:
    Candidate pools come from the full ranked universe.
-   Do not require positive direction scores for longs or negative direction scores for shorts.
-   A strong mean-reversion setup can be contrarian to the deterministic direction composite.
+   Judge candidates only from mean-reversion rank, stretch/exhaustion, volatility,
+   trend, range, momentum, and regime context.
 
 __PIPELINE_CONTEXT__
 
@@ -171,6 +173,42 @@ def build_turnover_overlay_system_prompt() -> str:
 def build_portfolio_system_prompt(turnover_aware: bool) -> str:
     """Backward-compatible wrapper for the stage-1 prompt builder."""
     return build_signal_stage_system_prompt(turnover_aware)
+
+
+def build_signal_ranking_system_prompt() -> str:
+    """Build the LLM-only mean-reversion signal ranking prompt."""
+    return """
+MEAN REVERSION SIGNAL RANKING STAGE
+Use only the provided point-in-time D1/D10 mean-reversion candidate buckets.
+Treat tickers as opaque identifiers. Do not use outside knowledge, calendar
+knowledge, or ticker familiarity.
+
+TASK:
+- Rank names within each side by expected mean-reversion edge over the next holding horizon.
+- Assign confidence_score for each name.
+- confidence_score means: confidence that this name has a better mean-reversion edge
+  than other names in the same D1/D10 bucket over the next holding horizon.
+- confidence_score is not a position size and not a probability of positive return.
+
+IMPORTANT:
+- Do not construct a portfolio.
+- Do not assign weights.
+- Do not consider turnover, holdings, transaction costs, or implementation.
+- Return every provided candidate exactly once on the same side.
+
+OUTPUT FORMAT (STRICT JSON):
+{
+  "long_rankings": [
+    {"ticker": "AAPL", "rank": 1, "confidence_score": 88},
+    ...
+  ],
+  "short_rankings": [
+    {"ticker": "XYZ", "rank": 1, "confidence_score": 84},
+    ...
+  ],
+  "reasoning": "1-2 sentence summary of the ranking criteria"
+}
+""".strip()
 
 
 def _build_signal_percentiles(signal_rows: list[dict]) -> dict[str, float]:
@@ -279,6 +317,122 @@ def _build_mean_reversion_candidate_views(
     }
 
 
+def _mean_reversion_combined_indicator_header() -> str:
+    """Header for the combined original technical + mean-reversion prompt view."""
+    return (
+        f"{'Ticker':<8} {'MRL':>6} {'MRS':>6} {'Trail5':>8} {'MRSig':>8} "
+        f"{'VixPctl':>8} {'VolPctl':>8} {'VIX':>7} {'VolImb':>7} "
+        f"{'M2/M1':>7} {'ATR':>7} {'RV10':>7} {'VAT_MA':>7} "
+        f"{'Rng55':>7} {'52WH':>7} {'Rng%':>7} {'AutoC':>7} {'Mom3m':>7} "
+        f"{'RSI5':>7} {'Vel/V':>7} {'D52WH':>7} {'VATSlo':>7} {'%MA100':>7} {'ADX':>7}"
+    )
+
+
+def _format_mean_reversion_combined_indicator_row(entry: dict) -> str:
+    """Format one candidate with both MR fields and original technical indicators."""
+    payload = entry["payload"]
+    indicators = payload.get("indicators", {})
+
+    def indicator_value(key: str) -> float:
+        return _safe_float(indicators.get(key), 0.0)
+
+    return (
+        f"{entry['ticker']:<8} "
+        f"{entry['long_score'] * 100.0:>6.1f} "
+        f"{entry['short_score'] * 100.0:>6.1f} "
+        f"{entry['trail_return'] * 100.0:>8.2f} "
+        f"{entry['mean_reversion_signal'] * 100.0:>8.2f} "
+        f"{indicator_value('vix_percentile_252d'):>8.3f} "
+        f"{indicator_value('vol_percentile_504d'):>8.3f} "
+        f"{indicator_value('vix_level'):>7.3f} "
+        f"{indicator_value('vol_imbalance_20d'):>7.3f} "
+        f"{indicator_value('m2_m1_ratio'):>7.3f} "
+        f"{indicator_value('atr_14d_pct'):>7.3f} "
+        f"{indicator_value('realized_vol_10d'):>7.3f} "
+        f"{indicator_value('vol_adjusted_trend_ma100'):>7.3f} "
+        f"{indicator_value('range_pos_55d'):>7.3f} "
+        f"{indicator_value('pct_from_52w_high'):>7.3f} "
+        f"{indicator_value('range_pct'):>7.3f} "
+        f"{indicator_value('autocorr_5d'):>7.3f} "
+        f"{indicator_value('mom_3m'):>7.3f} "
+        f"{indicator_value('rsi_5d'):>7.3f} "
+        f"{indicator_value('vel_10d_over_vol'):>7.3f} "
+        f"{indicator_value('days_since_52w_high'):>7.3f} "
+        f"{indicator_value('vol_adjusted_trend_ma100_slope'):>7.3f} "
+        f"{indicator_value('pct_from_ma100'):>7.3f} "
+        f"{indicator_value('adx_14d'):>7.3f}"
+    )
+
+
+def _format_signal_ranking_universe_for_prompt(
+    universe: dict,
+    regime: str = "unknown",
+    rebalance_id: str = "w_00001",
+) -> tuple[str, list[str], list[str]]:
+    """Format exact D1/D10 candidate buckets for LLM signal-only ranking."""
+    candidate_views = _build_mean_reversion_candidate_views(
+        universe,
+        candidate_mode="decile",
+    )
+    top_longs = candidate_views["long_candidates"]
+    top_shorts = candidate_views["short_candidates"]
+
+    def format_candidate_row(entry: dict) -> str:
+        return _format_mean_reversion_combined_indicator_row(entry)
+
+    lines = [
+        f"REBALANCE ID: {rebalance_id}",
+        f"MARKET REGIME: {regime}",
+        f"UNIVERSE SIZE: {len(universe)} stocks",
+        "PIPELINE MODE: signal-only ranking; portfolio construction happens later in the backtest harness",
+        "",
+        "CANDIDATE CONSTRUCTION:",
+        f"  Full-universe mean-reversion signal = -(trailing {TRAIL_LOOKBACK_DAYS}-trading-day return).",
+        "  D1 oversold names are long candidates; D10 overbought names are short candidates.",
+        "  Rank every name within its side. Do not drop names.",
+        "",
+        "CONFIDENCE SCORE:",
+        "  confidence_score is relative confidence that the name has better mean-reversion edge than same-side peers.",
+        "  It is not a position size and not a probability of positive return.",
+        "",
+        "INDICATOR SCALE: non-score indicator columns below are percentile-normalized to [0,1] when available.",
+        "",
+    ]
+    header = _mean_reversion_combined_indicator_header()
+
+    lines.append(f"=== D1 OVERSOLD LONG CANDIDATES ({len(top_longs)} names) ===")
+    if top_longs:
+        lines.append(header)
+        lines.append("-" * 205)
+        for entry in top_longs:
+            lines.append(format_candidate_row(entry))
+    lines.append("")
+
+    lines.append(f"=== D10 OVERBOUGHT SHORT CANDIDATES ({len(top_shorts)} names) ===")
+    if top_shorts:
+        lines.append(header)
+        lines.append("-" * 205)
+        for entry in top_shorts:
+            lines.append(format_candidate_row(entry))
+    lines.append("")
+    lines.extend(
+        [
+            "OUTPUT RULES:",
+            "1. Return every D1 ticker exactly once in long_rankings.",
+            "2. Return every D10 ticker exactly once in short_rankings.",
+            "3. Ranks must be contiguous integers starting at 1 within each side.",
+            "4. confidence_score must be numeric on [0, 100].",
+            "5. Do not assign weights or portfolio sizes.",
+        ]
+    )
+
+    return (
+        "\n".join(lines),
+        [entry["ticker"] for entry in top_longs],
+        [entry["ticker"] for entry in top_shorts],
+    )
+
+
 def _format_universe_for_prompt(
     universe: dict,
     previous_portfolio: dict = None,
@@ -303,28 +457,8 @@ def _format_universe_for_prompt(
     top_shorts = candidate_views["short_candidates"]
     normalized_candidate_mode = candidate_views["candidate_mode"]
 
-    def indicator_value(indicators: dict, key: str) -> float:
-        return _safe_float(indicators.get(key), 0.0)
-
     def format_candidate_row(entry: dict) -> str:
-        payload = entry["payload"]
-        indicators = payload.get("indicators", {})
-        return (
-            f"{entry['ticker']:<8} "
-            f"{entry['long_score'] * 100.0:>6.1f} "
-            f"{entry['short_score'] * 100.0:>6.1f} "
-            f"{entry['trail_return'] * 100.0:>8.2f} "
-            f"{entry['mean_reversion_signal'] * 100.0:>8.2f} "
-            f"{indicator_value(indicators, 'rsi_5d'):>7.3f} "
-            f"{indicator_value(indicators, 'range_pos_55d'):>7.3f} "
-            f"{indicator_value(indicators, 'vel_10d_over_vol'):>7.3f} "
-            f"{indicator_value(indicators, 'pct_from_ma100'):>7.3f} "
-            f"{indicator_value(indicators, 'pct_from_52w_high'):>7.3f} "
-            f"{indicator_value(indicators, 'mom_3m'):>7.3f} "
-            f"{indicator_value(indicators, 'autocorr_5d'):>7.3f} "
-            f"{indicator_value(indicators, 'adx_14d'):>7.3f} "
-            f"{indicator_value(indicators, 'vol_percentile_504d'):>8.3f}"
-        )
+        return _format_mean_reversion_combined_indicator_row(entry)
 
     lines = []
     lines.append(f"REBALANCE ID: {rebalance_id}")
@@ -355,11 +489,7 @@ def _format_universe_for_prompt(
     lines.append("INDICATOR SCALE: non-score indicator columns below are percentile-normalized to [0,1] when available.")
     lines.append("")
 
-    header = (
-        f"{'Ticker':<8} {'MRL':>6} {'MRS':>6} {'Trail5':>8} {'MRSig':>8} "
-        f"{'RSI5':>7} {'Rng55':>7} {'Vel/V':>7} {'%MA100':>7} {'52WH':>7} "
-        f"{'Mom3m':>7} {'AutoC':>7} {'ADX':>7} {'VolPctl':>8}"
-    )
+    header = _mean_reversion_combined_indicator_header()
 
     if normalized_candidate_mode == "decile":
         lines.append(f"=== D1 OVERSOLD LONG CANDIDATES ({len(top_longs)} names) ===")
@@ -367,7 +497,7 @@ def _format_universe_for_prompt(
         lines.append(f"=== TOP {len(top_longs)} OVERSOLD LONG CANDIDATES ===")
     if top_longs:
         lines.append(header)
-        lines.append("-" * 126)
+        lines.append("-" * 205)
         for entry in top_longs:
             lines.append(format_candidate_row(entry))
     lines.append("")
@@ -378,7 +508,7 @@ def _format_universe_for_prompt(
         lines.append(f"=== TOP {len(top_shorts)} OVERBOUGHT SHORT CANDIDATES ===")
     if top_shorts:
         lines.append(header)
-        lines.append("-" * 126)
+        lines.append("-" * 205)
         for entry in top_shorts:
             lines.append(format_candidate_row(entry))
     lines.append("")
@@ -479,6 +609,88 @@ def _validate_signal_stage_output(
     }
 
 
+def _coerce_signal_ranking_list(
+    raw_rankings: Any,
+    expected_tickers: Sequence[str],
+    side_label: str,
+) -> list[dict]:
+    if not isinstance(raw_rankings, list):
+        raise ValueError(f"{side_label} rankings must be a list")
+
+    expected = [_normalize_ticker(ticker) for ticker in expected_tickers]
+    expected_set = set(expected)
+    cleaned = []
+    seen = set()
+
+    for raw in raw_rankings:
+        if not isinstance(raw, dict):
+            raise ValueError(f"{side_label} rankings must contain objects")
+        ticker = _normalize_ticker(raw.get("ticker"))
+        if ticker not in expected_set:
+            raise ValueError(f"{side_label} ranking contains unexpected ticker {ticker!r}")
+        if ticker in seen:
+            raise ValueError(f"{side_label} ranking contains duplicate ticker {ticker}")
+        seen.add(ticker)
+
+        try:
+            rank = int(raw.get("rank"))
+        except (TypeError, ValueError):
+            raise ValueError(f"{side_label} ranking for {ticker} has invalid rank")
+        confidence_score = _safe_float(raw.get("confidence_score", raw.get("edge_score")), np.nan)
+        if np.isnan(confidence_score) or confidence_score < 0.0 or confidence_score > 100.0:
+            raise ValueError(f"{side_label} ranking for {ticker} has invalid confidence_score")
+
+        cleaned.append(
+            {
+                "ticker": ticker,
+                "rank": rank,
+                "confidence_score": float(confidence_score),
+            }
+        )
+
+    missing = expected_set - seen
+    if missing:
+        raise ValueError(f"{side_label} ranking missing tickers: {sorted(missing)}")
+
+    expected_ranks = set(range(1, len(expected) + 1))
+    actual_ranks = {entry["rank"] for entry in cleaned}
+    if actual_ranks != expected_ranks:
+        raise ValueError(
+            f"{side_label} ranks must be contiguous 1..{len(expected)}, got {sorted(actual_ranks)}"
+        )
+
+    return sorted(cleaned, key=lambda entry: entry["rank"])
+
+
+def _validate_signal_ranking_output(
+    raw_output: dict,
+    expected_long_tickers: Sequence[str],
+    expected_short_tickers: Sequence[str],
+) -> dict:
+    long_rankings = _coerce_signal_ranking_list(
+        raw_output.get("long_rankings", raw_output.get("long_candidates", [])),
+        expected_long_tickers,
+        "long",
+    )
+    short_rankings = _coerce_signal_ranking_list(
+        raw_output.get("short_rankings", raw_output.get("short_candidates", [])),
+        expected_short_tickers,
+        "short",
+    )
+    long_set = {entry["ticker"] for entry in long_rankings}
+    short_set = {entry["ticker"] for entry in short_rankings}
+    overlap = long_set & short_set
+    if overlap:
+        raise ValueError(f"rankings contain cross-leg overlap: {sorted(overlap)}")
+
+    return {
+        "long_rankings": long_rankings,
+        "short_rankings": short_rankings,
+        "reasoning": str(raw_output.get("reasoning", "")).strip(),
+        "schema_version": SIGNAL_RANKING_SCHEMA_VERSION,
+    }
+
+
 async def construct_signal_candidates_from_universe(
     client: httpx.AsyncClient,
     universe: dict,
@@ -555,6 +767,66 @@ RULES:
         ),
         capture_trace=log_llm_trace,
     )
+
+
+async def construct_signal_ranking_from_universe(
+    client: httpx.AsyncClient,
+    universe: dict,
+    regime: str,
+    rebalance_id: str,
+    model: str,
+    temperature: float,
+    log_llm_trace: bool = False,
+) -> dict:
+    """Signal-only path: rank every D1/D10 mean-reversion candidate."""
+    universe_text, expected_longs, expected_shorts = _format_signal_ranking_universe_for_prompt(
+        universe=universe,
+        regime=regime,
+        rebalance_id=rebalance_id,
+    )
+    if not expected_longs or not expected_shorts:
+        raise ValueError(
+            "Signal ranking requires non-empty D1 long and D10 short candidate buckets"
+        )
+
+    user_content = f"""Rank these D1/D10 mean-reversion candidates.
+
+{universe_text}
+
+Return ONLY valid JSON with long_rankings and short_rankings arrays.
+Each entry must have ticker, rank, and confidence_score.
+"""
+
+    base_messages = [
+        {"role": "system", "content": build_signal_ranking_system_prompt()},
+        {"role": "user", "content": user_content},
+    ]
+    retry_instruction = (
+        "Your previous response was invalid. Return ONLY valid JSON with "
+        "long_rankings and short_rankings arrays. Include every provided ticker exactly once "
+        "on its original side. Each entry needs ticker, rank, and confidence_score. "
+        "Ranks must be contiguous integers starting at 1. Do not assign weights."
+    )
+
+    result = await _call_llm_json_with_validation(
+        client=client,
+        model=model,
+        temperature=temperature,
+        base_messages=base_messages,
+        retry_instruction=retry_instruction,
+        stage_label="Mean-reversion signal ranking stage",
+        validate_output=lambda raw_output: _validate_signal_ranking_output(
+            raw_output,
+            expected_longs,
+            expected_shorts,
+        ),
+        capture_trace=log_llm_trace,
+    )
+    result["candidate_counts"] = {
+        "long": len(expected_longs),
+        "short": len(expected_shorts),
+    }
+    return result
 
 
 async def construct_portfolio_from_universe(
@@ -722,8 +994,10 @@ __all__ = [
     "apply_turnover_overlay_to_portfolio",
     "build_portfolio_system_prompt",
     "build_signal_stage_system_prompt",
+    "build_signal_ranking_system_prompt",
     "build_turnover_overlay_system_prompt",
     "construct_portfolio_from_universe",
     "construct_signal_candidates_from_universe",
+    "construct_signal_ranking_from_universe",
     "MEAN_REVERSION_CANDIDATE_MODES",
 ]

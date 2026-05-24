@@ -58,6 +58,13 @@ LLM_MISSING_POLICY = "renormalize_survivors"
 LLM_MISSING_POLICIES = {"renormalize_survivors", "cash_missing", "fail_if_incomplete"}
                      # Turnover = sum(|w_new - w_old|) = 2x full notional traded (long-short)
 SCORE_TYPES = ["direction_score", "magnitude_score"]
+LLM_SIGNAL_SCORE_TYPES = {
+    "mean_reversion_raw_score",
+    "mean_reversion_rank_score",
+    "llm_raw_confidence_score",
+    "llm_rank_score",
+    "llm_rank_confidence_score",
+}
 LLM_REQUIRED_COLUMNS = {
     "llm_selected",
     "llm_side",
@@ -2780,6 +2787,10 @@ _BLUE      = "#58a6ff"
 _GREEN     = "#3fb950"
 _RED       = "#f85149"
 _YELLOW    = "#d29922"
+_ORANGE    = "#f97316"
+_PURPLE    = "#a371f7"
+_CYAN      = "#39c5cf"
+_PINK      = "#db61a2"
 _TITLE_CLR = "#58a6ff"
 
 
@@ -3038,6 +3049,11 @@ def _slide1_factor_summary(metrics, all_data, ic_series, output_dir, score_type=
     predicts_label = {
         "direction_score": "10-Day Forward Return Direction",
         "magnitude_score": "10-Day Absolute Forward Return",
+        "mean_reversion_raw_score": "Mean-Reversion Raw Score",
+        "mean_reversion_rank_score": "Mean-Reversion Rank Score",
+        "llm_raw_confidence_score": "LLM Raw Confidence Score",
+        "llm_rank_score": "LLM Rank Score",
+        "llm_rank_confidence_score": "LLM Rank + Confidence Score",
     }.get(score_type, "10-Day Forward Return")
 
     def _color(val_str, signed):
@@ -3644,6 +3660,11 @@ def _slide8_short_only_summary(pnl_df, metrics, all_data, ic_series, output_dir,
 _FACTOR_COLORS = {
     "direction_score": _BLUE,
     "magnitude_score": _GREEN,
+    "mean_reversion_raw_score": _YELLOW,
+    "mean_reversion_rank_score": _ORANGE,
+    "llm_raw_confidence_score": _PURPLE,
+    "llm_rank_score": _CYAN,
+    "llm_rank_confidence_score": _PINK,
 }
 
 
@@ -4123,6 +4144,24 @@ def _parse_score_types(value: str) -> list[str]:
     return score_types
 
 
+def build_compact_leaderboard(results: dict) -> pd.DataFrame:
+    """Manager-facing score comparison with only headline signal metrics."""
+    rows = []
+    for score_type, (pnl_df, metrics) in results.items():
+        overall = metrics.get("overall", {})
+        cumulative = pnl_df.get("cumulative_ret", pd.Series(dtype=float))
+        rows.append(
+            {
+                "score_type": score_type,
+                "sharpe": float(overall.get("sharpe", np.nan)),
+                "ic_mean": float(overall.get("ic_mean", np.nan)),
+                "total_return_pct": float(overall.get("total_ret", np.nan)),
+                "cagr_pct": float(_cagr(cumulative)) if len(cumulative) > 0 else np.nan,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("sharpe", ascending=False).reset_index(drop=True)
+
+
 def main():
     """Parse CLI arguments and run backtest.
     
@@ -4284,7 +4323,7 @@ def main():
     if top_n <= 0 or bottom_n <= 0:
         print("❌ --top-n and --bottom-n must be positive")
         return
-    allowed_score_types = {"direction_score", "magnitude_score"}
+    allowed_score_types = {"direction_score", "magnitude_score"} | LLM_SIGNAL_SCORE_TYPES
     invalid_score_types = [score_type for score_type in score_types if score_type not in allowed_score_types]
     if invalid_score_types:
         print(f"❌ Unsupported score type(s): {', '.join(invalid_score_types)}")
@@ -4506,6 +4545,16 @@ def main():
             periodic_static=periodic_static,
         )
         results[score_type] = (pnl_df, metrics)
+
+    compact_leaderboard = build_compact_leaderboard(results)
+    compact_leaderboard.to_csv(OUTPUT_DIR / "compact_leaderboard.csv", index=False)
+    print("\n--- COMPACT LEADERBOARD ---")
+    print(
+        compact_leaderboard.to_string(
+            index=False,
+            float_format=lambda value: f"{value:.4f}" if isinstance(value, float) else str(value),
+        )
+    )
 
     # ── Cross-factor comparison slide (saved at root output dir) ──────────────
     if skip_plots:

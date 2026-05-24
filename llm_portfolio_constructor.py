@@ -27,6 +27,7 @@ from typing import Dict, Any, List, Optional
 
 import numpy as np
 import pandas as pd
+import httpx
 
 from data_source_config import (
     DATASET_VERSION,
@@ -56,6 +57,7 @@ COMPOSITE_SCORES_DIR = DEFAULT_COMPOSITE_SCORES_DIR
 SPY_DATA_PATH = SPY_SIGNAL_DATA_PATH
 CACHE_DIR = Path("backtest_results/llm_portfolio_cache")
 CACHE_SCHEMA_VERSION = 3
+SIGNAL_CACHE_SCHEMA_VERSION = 1
 PROMPT_FORMAT_VERSION = "two_stage_signal_overlay_v6_r1000_prefilter_compact_trace"
 DEFAULT_MODEL = technical_llm.DEFAULT_MODEL
 DEFAULT_LLM_STRATEGY = "deterministic"
@@ -471,6 +473,7 @@ def build_cache_filename(
     top_n_magnitude: Optional[int] = None,
     mean_reversion_candidate_mode: str = "fixed_top_n",
     compact_output: bool = False,
+    signal_only: bool = False,
 ) -> str:
     """Build a cache filename that preserves prompt and execution variants."""
     execution_mode = "equal_weight" if use_equal_weight else "llm_weighted"
@@ -493,6 +496,8 @@ def build_cache_filename(
         config_suffix += f"_cand-{_sanitize_cache_token(mean_reversion_candidate_mode)}"
     if compact_output:
         config_suffix += "_compact"
+    if signal_only:
+        config_suffix += "_signalonly"
     if temperature is not None:
         config_suffix += f"_temp{_format_cache_float_token(temperature)}"
     return (
@@ -601,6 +606,7 @@ async def run_batch(
     target_positions_per_side: Optional[int] = None,
     mean_reversion_candidate_mode: str = "fixed_top_n",
     compact_output: bool = False,
+    signal_only: bool = False,
     enable_loss_memory: bool = False,
     loss_memory_top_k: int = 3,
     loss_memory_max_targets_per_side: int = 4,
@@ -621,6 +627,8 @@ async def run_batch(
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date)
     llm_module = _resolve_llm_strategy_module(strategy_style)
+    if signal_only and strategy_style != "mean_reversion":
+        raise ValueError("--signal-only currently supports --strategy-style mean_reversion only")
     target_positions_per_side = technical_llm.normalize_target_positions_per_side(
         target_positions_per_side
     )
@@ -657,6 +665,7 @@ async def run_batch(
         print(f"Top-N ranked candidates shown to LLM: {effective_top_n}")
     print(f"Min decision price: > ${MIN_TRADE_PRICE:.2f}")
     print(f"Execution mode: {'equal_weight' if use_equal_weight else 'llm_weighted'}")
+    print(f"Signal-only artifact: {'enabled' if signal_only else 'disabled'}")
     print(f"LLM prompt: {prompt_style_label(turnover_aware)}")
     print(f"Compact LLM output: {'enabled' if compact_output else 'disabled'}")
     print(f"Prompt/response trace logging: {'enabled' if log_llm_trace else 'disabled'}")
@@ -709,18 +718,25 @@ async def run_batch(
         top_n_magnitude=effective_top_n,
         mean_reversion_candidate_mode=mean_reversion_candidate_mode,
         compact_output=compact_output,
+        signal_only=signal_only,
     )
     cache_path = CACHE_DIR / cache_filename
     execution_mode = "equal_weight" if use_equal_weight else "llm_weighted"
-    cache = load_cache(cache_path) if resume else {"portfolios": {}, "metadata": {}, "failures": {}}
+    empty_cache = {"signals": {}, "metadata": {}, "failures": {}} if signal_only else {"portfolios": {}, "metadata": {}, "failures": {}}
+    cache = load_cache(cache_path) if resume else empty_cache
     cached_min_price = cache.get("metadata", {}).get("min_decision_price")
-    if resume and cache.get("portfolios") and cached_min_price != MIN_TRADE_PRICE:
+    cache_entries_key = "signals" if signal_only else "portfolios"
+    if resume and cache.get(cache_entries_key) and cached_min_price != MIN_TRADE_PRICE:
         print(
             "⚠️  Existing cache was built with a different minimum decision price. "
             "Rebuilding LLM portfolios with the new filter."
         )
-        cache = {"portfolios": {}, "metadata": {}, "failures": {}}
-    elif resume and cache.get("portfolios") and not _cache_is_compatible(
+        cache = empty_cache
+    elif (
+        resume
+        and cache.get(cache_entries_key)
+        and not signal_only
+        and not _cache_is_compatible(
         cache,
         execution_mode,
         turnover_aware,
@@ -735,15 +751,34 @@ async def run_batch(
         loss_memory_top_k,
         loss_memory_max_targets_per_side,
         log_llm_trace,
-    ):
+    )):
         print(
             "⚠️  Existing cache uses a legacy or incompatible schema. "
             "Ignoring it and rebuilding strict LLM portfolios."
         )
-        cache = {"portfolios": {}, "metadata": {}, "failures": {}}
+        cache = empty_cache
+    elif resume and cache.get(cache_entries_key) and signal_only:
+        metadata = cache.get("metadata", {})
+        if (
+            metadata.get("artifact_type") != "llm_mean_reversion_signal_rankings"
+            or metadata.get("schema_version") != SIGNAL_CACHE_SCHEMA_VERSION
+            or metadata.get("model") != model
+            or metadata.get("source_dataset") != DATASET_VERSION
+            or metadata.get("composite_scores_dir") != str(COMPOSITE_SCORES_DIR)
+        ):
+            print(
+                "⚠️  Existing signal cache uses an incompatible schema or source. "
+                "Ignoring it and rebuilding."
+            )
+            cache = empty_cache
 
     cache["metadata"] = {
-        "schema_version": CACHE_SCHEMA_VERSION,
+        "schema_version": SIGNAL_CACHE_SCHEMA_VERSION if signal_only else CACHE_SCHEMA_VERSION,
+        "artifact_type": (
+            "llm_mean_reversion_signal_rankings"
+            if signal_only
+            else "llm_portfolio_decisions"
+        ),
         "start_date": start_date,
         "end_date": end_date,
         "rebalance_days": rebalance_days,
@@ -752,6 +787,7 @@ async def run_batch(
         "top_n_magnitude": effective_top_n,
         "mean_reversion_candidate_mode": mean_reversion_candidate_mode,
         "compact_output": bool(compact_output),
+        "signal_only": bool(signal_only),
         "target_positions_per_side": target_positions_per_side,
         "min_decision_price": MIN_TRADE_PRICE,
         "execution_mode": execution_mode,
@@ -773,6 +809,7 @@ async def run_batch(
         "total_rebalance_dates": len(rebalance_dates),
     }
     cache.setdefault("failures", {})
+    cache.setdefault(cache_entries_key, {})
 
     loss_memory_store = None
     if enable_loss_memory:
@@ -798,9 +835,10 @@ async def run_batch(
             )
 
         # Skip if already cached
-        if resume and date_str in cache["portfolios"]:
+        if resume and date_str in cache.setdefault(cache_entries_key, {}):
             # Restore previous portfolio from cache for continuity
-            previous_portfolio = cache["portfolios"][date_str]
+            if not signal_only:
+                previous_portfolio = cache["portfolios"][date_str]
             skipped += 1
             print(f"   ⏩ [{i+1}/{len(rebalance_dates)}] {date_str} — cached, skipping")
             continue
@@ -871,6 +909,46 @@ async def run_batch(
         try:
             t0 = time.time()
             strategy_kwargs = {}
+            if signal_only:
+                async with httpx.AsyncClient(timeout=technical_llm.PORTFOLIO_REQUEST_TIMEOUT) as client:
+                    ranking = await llm_module.construct_signal_ranking_from_universe(
+                        client=client,
+                        universe=universe,
+                        regime=regime,
+                        rebalance_id=f"w_{abs(hash(date_str)) % 100000:05d}",
+                        model=model,
+                        temperature=temperature,
+                        log_llm_trace=log_llm_trace,
+                    )
+                elapsed = time.time() - t0
+                n_long = len(ranking.get("long_rankings", []))
+                n_short = len(ranking.get("short_rankings", []))
+                provider_usage = ranking.get("llm_usage", {}).get("provider_usage", {})
+                total_tokens = provider_usage.get("total_tokens")
+                if total_tokens is None:
+                    total_tokens = ranking.get("llm_usage", {}).get("approx_total_tokens")
+                token_segment = f" | Tokens: {int(total_tokens)}" if total_tokens is not None else ""
+                signal_entry = {
+                    "rebalance_date": date_str,
+                    "rebalance_id": f"w_{abs(hash(date_str)) % 100000:05d}",
+                    "regime": regime,
+                    "llm_source": "llm",
+                    "signal_schema_version": SIGNAL_CACHE_SCHEMA_VERSION,
+                    **ranking,
+                }
+                cache["signals"][date_str] = signal_entry
+                cache["failures"].pop(date_str, None)
+                save_cache(cache, cache_path)
+                completed += 1
+                print(
+                    f"      ✓ ranked {n_long} D1 longs / {n_short} D10 shorts | "
+                    f"{elapsed:.1f}s"
+                    f"{token_segment}"
+                )
+                if i < len(rebalance_dates) - 1:
+                    await asyncio.sleep(rate_limit_delay)
+                continue
+
             if strategy_style == "mean_reversion":
                 strategy_kwargs["candidate_mode"] = mean_reversion_candidate_mode
                 strategy_kwargs["compact_output"] = compact_output
@@ -980,6 +1058,11 @@ def main():
         action="store_true",
         help="Ask compatible LLM strategy prompts to omit per-name rationales and return compact JSON",
     )
+    parser.add_argument(
+        "--signal-only",
+        action="store_true",
+        help="For mean_reversion, cache LLM D1/D10 rankings instead of portfolio baskets",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"DeepSeek model name (default: {DEFAULT_MODEL})")
     parser.add_argument("--rate-limit", type=float, default=2.0, help="Delay between API calls in seconds")
     parser.add_argument("--equal-weight", action="store_true", help="Override LLM sizing and execute each leg equal-weighted")
@@ -1036,6 +1119,7 @@ def main():
             target_positions_per_side=args.positions_per_side,
             mean_reversion_candidate_mode=args.mean_reversion_candidate_mode,
             compact_output=args.compact_output,
+            signal_only=args.signal_only,
             turnover_aware=args.turnover_aware,
             enable_loss_memory=args.enable_loss_memory,
             loss_memory_top_k=args.loss_memory_top_k,
