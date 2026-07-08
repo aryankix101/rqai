@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import asyncio
 from pathlib import Path
 
 import numpy as np
@@ -248,6 +249,31 @@ class MeanReversionLLMV1Tests(unittest.TestCase):
                 prompt_style=v1.PROMPT_STYLE_RANK_CONFIDENCE,
             )
 
+    def test_validate_rank_confidence_scores_accepts_normalized_cache_entry(self):
+        cleaned = v1.validate_llm_scores(
+            {
+                "long_scores": [
+                    {"ticker": "AAA", "rank": 1, "confidence_score": 80, "score": 80},
+                    {"ticker": "BBB", "rank": 2, "confidence_score": 60, "score": 30},
+                ],
+                "short_scores": [
+                    {"ticker": "CCC", "rank": 1, "confidence_score": 90, "score": 90},
+                    {"ticker": "DDD", "rank": 2, "confidence_score": 50, "score": 25},
+                ],
+            },
+            ["AAA", "BBB"],
+            ["CCC", "DDD"],
+            prompt_style=v1.PROMPT_STYLE_RANK_CONFIDENCE,
+        )
+
+        self.assertEqual(
+            cleaned["long_scores"],
+            [
+                {"ticker": "AAA", "rank": 1, "confidence_score": 80, "score": 80},
+                {"ticker": "BBB", "rank": 2, "confidence_score": 60, "score": 30},
+            ],
+        )
+
     def test_validate_llm_scores_rounds_floats_and_rejects_bad_outputs(self):
         cleaned = v1.validate_llm_scores(
             {
@@ -296,6 +322,77 @@ class MeanReversionLLMV1Tests(unittest.TestCase):
         )
         self.assertEqual(signed, {"AAA": 80.0, "BBB": -70.0})
         self.assertNotIn("CCC", signed)
+
+    def test_ensure_llm_score_recalls_invalid_rank_confidence_cache(self):
+        pool = v1.CandidatePool(
+            signal_date=pd.Timestamp("2020-01-03"),
+            lookback_date=pd.Timestamp("2019-12-20"),
+            exit_date=pd.Timestamp("2020-01-10"),
+            entry_open_date=pd.Timestamp("2020-01-06"),
+            exit_open_date=pd.Timestamp("2020-01-13"),
+            valid_tickers=["AAA", "BBB", "CCC", "DDD"],
+            long_tickers=["AAA", "BBB"],
+            short_tickers=["CCC", "DDD"],
+            trail_by_ticker={},
+            signal_by_ticker={},
+            feature_rows={},
+            universe_hash="hash1",
+            regime="mixed",
+        )
+        model = "test-model"
+        prompt_style = v1.PROMPT_STYLE_RANK_CONFIDENCE
+        prompt_version = v1.prompt_version_for_style(prompt_style)
+        date_key = str(pool.signal_date.date())
+        cache = {
+            "metadata": {},
+            "signals": {
+                date_key: {
+                    "cache_key": v1._cache_key(pool.signal_date, prompt_version, model, pool.universe_hash),
+                    "long_scores": [{"ticker": "AAA", "score": 80}],
+                    "short_scores": [{"ticker": "CCC", "score": 90}],
+                }
+            },
+            "failures": {},
+        }
+        calls = 0
+
+        async def fake_call_llm_scores(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return {
+                "long_scores": [
+                    {"ticker": "AAA", "rank": 1, "confidence_score": 80, "score": 80},
+                    {"ticker": "BBB", "rank": 2, "confidence_score": 60, "score": 30},
+                ],
+                "short_scores": [
+                    {"ticker": "CCC", "rank": 1, "confidence_score": 90, "score": 90},
+                    {"ticker": "DDD", "rank": 2, "confidence_score": 50, "score": 25},
+                ],
+                "parse_status": "ok",
+                "retry_count": 0,
+            }
+
+        original_call = v1.call_llm_scores
+        v1.call_llm_scores = fake_call_llm_scores
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = asyncio.run(
+                    v1.ensure_llm_score_for_pool(
+                        client=None,
+                        pool=pool,
+                        cache=cache,
+                        cache_path=Path(tmpdir) / "scores.json",
+                        model=model,
+                        temperature=0.0,
+                        prompt_style=prompt_style,
+                    )
+                )
+        finally:
+            v1.call_llm_scores = original_call
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(result["long_scores"][0]["ticker"], "AAA")
+        self.assertNotIn(date_key, cache["failures"])
 
     def test_small_fixture_writes_three_run_artifacts_and_comparison(self):
         tickers = [f"T{i:02d}" for i in range(30)]

@@ -654,10 +654,19 @@ def validate_llm_scores(
         raise ValueError("Input pools overlap")
 
     if prompt_style == PROMPT_STYLE_RANK_CONFIDENCE:
-        def clean_ranking_side(key: str, expected: set[str], other: set[str]) -> list[dict[str, int | str]]:
-            raw_entries = raw_output.get(key)
+        def clean_ranking_side(
+            ranking_key: str,
+            score_key: str,
+            expected: set[str],
+            other: set[str],
+        ) -> list[dict[str, int | str]]:
+            raw_entries = raw_output.get(ranking_key)
+            key = ranking_key
+            if raw_entries is None:
+                raw_entries = raw_output.get(score_key)
+                key = score_key
             if not isinstance(raw_entries, list):
-                raise ValueError(f"Missing {key} array")
+                raise ValueError(f"Missing {ranking_key} or {score_key} array")
             seen_tickers: set[str] = set()
             seen_ranks: set[int] = set()
             cleaned = []
@@ -711,8 +720,8 @@ def validate_llm_scores(
                 raise ValueError(f"{key} ranks must be a complete 1..{side_count} permutation")
             return sorted(cleaned, key=lambda item: int(item["rank"]))
 
-        long_scores = clean_ranking_side("long_rankings", expected_long_set, expected_short_set)
-        short_scores = clean_ranking_side("short_rankings", expected_short_set, expected_long_set)
+        long_scores = clean_ranking_side("long_rankings", "long_scores", expected_long_set, expected_short_set)
+        short_scores = clean_ranking_side("short_rankings", "short_scores", expected_short_set, expected_long_set)
         return {"long_scores": long_scores, "short_scores": short_scores}
 
     def clean_side(key: str, expected: set[str], other: set[str]) -> list[dict[str, int | str]]:
@@ -867,6 +876,28 @@ def _entry_from_cache(
     return validate_llm_scores(entry, pool.long_tickers, pool.short_tickers, prompt_style)
 
 
+def _record_invalid_cache_entry(
+    cache: dict[str, Any],
+    date_key: str,
+    exc: Exception,
+    prompt_version: str,
+    prompt_style: str,
+    model: str,
+    universe_hash: str,
+) -> None:
+    cache.setdefault("signals", {}).pop(date_key, None)
+    cache.setdefault("failures", {})[date_key] = {
+        "error": f"Invalid cached LLM score entry: {exc}",
+        "parse_status": "invalid_cache",
+        "retry_count": 0,
+        "prompt_version": prompt_version,
+        "prompt_style": prompt_style,
+        "model": model,
+        "universe_hash": universe_hash,
+        "failed_at": pd.Timestamp.utcnow().isoformat(),
+    }
+
+
 async def ensure_llm_score_for_pool(
     client: httpx.AsyncClient,
     pool: CandidatePool,
@@ -880,9 +911,21 @@ async def ensure_llm_score_for_pool(
     date_str = str(pool.signal_date.date())
     existing = cache.setdefault("signals", {}).get(date_str)
     if isinstance(existing, dict):
-        cached = _entry_from_cache(existing, pool, model, prompt_version, prompt_style)
-        if cached is not None:
-            return cached
+        try:
+            cached = _entry_from_cache(existing, pool, model, prompt_version, prompt_style)
+            if cached is not None:
+                return cached
+        except ValueError as exc:
+            _record_invalid_cache_entry(
+                cache,
+                date_str,
+                exc,
+                prompt_version,
+                prompt_style,
+                model,
+                pool.universe_hash,
+            )
+            save_cache(cache, cache_path)
 
     try:
         result = await call_llm_scores(client, pool, model=model, temperature=temperature, prompt_style=prompt_style)
@@ -969,6 +1012,7 @@ def run_pool_strategy(
     positions_per_side: int,
     score_provider: str,
     llm_scores_by_date: dict[str, dict[str, Any]] | None = None,
+    llm_prompt_style: str = DEFAULT_PROMPT_STYLE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[CandidatePool]]:
     close_df = market_frames.close_df
     open_df = market_frames.open_df
@@ -1012,7 +1056,12 @@ def run_pool_strategy(
             if llm_scores_by_date is None:
                 raise ValueError("llm_scores_by_date is required for score_provider='llm'")
             date_key = str(pool.signal_date.date())
-            validated = validate_llm_scores(llm_scores_by_date[date_key], pool.long_tickers, pool.short_tickers)
+            validated = validate_llm_scores(
+                llm_scores_by_date[date_key],
+                pool.long_tickers,
+                pool.short_tickers,
+                llm_prompt_style,
+            )
             signed_scores = signed_scores_from_llm(validated)
         else:
             raise ValueError(f"Unsupported score_provider: {score_provider}")
@@ -1360,10 +1409,23 @@ async def collect_llm_scores_for_pools(
         for idx, pool in enumerate(pools, start=1):
             date_key = str(pool.signal_date.date())
             if date_key in cache.setdefault("signals", {}):
-                cached = _entry_from_cache(cache["signals"][date_key], pool, model, prompt_version)
-                if cached is not None:
-                    print(f"  [{idx}/{len(pools)}] {date_key} cached")
-                    continue
+                try:
+                    cached = _entry_from_cache(cache["signals"][date_key], pool, model, prompt_version, prompt_style)
+                    if cached is not None:
+                        print(f"  [{idx}/{len(pools)}] {date_key} cached")
+                        continue
+                except ValueError as exc:
+                    print(f"  [{idx}/{len(pools)}] {date_key} invalid cache; recalling LLM ({exc})")
+                    _record_invalid_cache_entry(
+                        cache,
+                        date_key,
+                        exc,
+                        prompt_version,
+                        prompt_style,
+                        model,
+                        pool.universe_hash,
+                    )
+                    save_cache(cache, cache_path)
             print(f"  [{idx}/{len(pools)}] {date_key} calling LLM")
             await ensure_llm_score_for_pool(client, pool, cache, cache_path, model, temperature, prompt_style)
             if idx < len(pools):
@@ -1438,6 +1500,7 @@ async def run_sanity_phase(
         positions_per_side=positions_per_side,
         score_provider="llm",
         llm_scores_by_date=llm_scores,
+        llm_prompt_style=prompt_style,
     )
     sanity_bundle = build_bundle(weekly, checks, selections, config)
     save_bundle(sanity_bundle, output_dir)
@@ -1488,6 +1551,7 @@ async def run_full_phase(
         positions_per_side=positions_per_side,
         score_provider="llm",
         llm_scores_by_date=llm_scores,
+        llm_prompt_style=prompt_style,
     )
     bundles["LLM-Pool v1"] = build_bundle(weekly, checks, selections, config)
     save_bundle(bundles["LLM-Pool v1"], output_dir / "llm_pool_v1")

@@ -32,7 +32,6 @@ LEGACY_LABELS = {
     "llm_raw_confidence_score": "Legacy LLM Raw Confidence",
     "llm_rank_score": "Legacy LLM Rank",
     "llm_rank_confidence_score": "Legacy LLM Rank + Confidence",
-    "mean_reversion_rank_score": "Legacy Det Rank",
     "mean_reversion_raw_score": "Legacy Det Raw",
 }
 
@@ -40,9 +39,10 @@ LEGACY_SIGNAL_DESCRIPTIONS = {
     "llm_raw_confidence_score": "LLM confidence only",
     "llm_rank_score": "LLM rank only",
     "llm_rank_confidence_score": "LLM rank + confidence",
-    "mean_reversion_rank_score": "deterministic mean-reversion rank",
     "mean_reversion_raw_score": "deterministic raw mean-reversion score",
 }
+
+EXCLUDED_LEGACY_SCORE_TYPES = {"mean_reversion_rank_score"}
 
 V1_RUNS = [
     {
@@ -211,6 +211,205 @@ def safe_cagr_pct(returns: list[float], periods_per_year: float) -> float:
     return (cumulative ** (periods_per_year / len(returns)) - 1.0) * 100.0
 
 
+def drawdown_points(points: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    peak = 1.0
+    rows: list[dict[str, Any]] = []
+    for point in points:
+        growth = float(point["values"][key]["growth"])
+        peak = max(peak, growth)
+        drawdown = growth / peak - 1.0 if peak else 0.0
+        rows.append({"date": point["date"], "drawdownPct": drawdown * 100.0})
+    return rows
+
+
+def rolling_mean_points(rows: list[dict[str, str]], column: str, window: int) -> list[dict[str, Any]]:
+    values: list[tuple[str, float]] = []
+    for row in rows:
+        if row.get(column) in (None, ""):
+            continue
+        values.append((row["date"], to_float(row.get(column))))
+    output: list[dict[str, Any]] = []
+    for idx in range(len(values)):
+        start = max(0, idx - window + 1)
+        subset = [value for _, value in values[start : idx + 1]]
+        if len(subset) >= max(3, min(window, 6)):
+            output.append({"date": values[idx][0], "value": mean(subset)})
+    return output
+
+
+def regime_breakdown(
+    rows: list[dict[str, str]],
+    return_columns: list[str],
+    periods_per_year: float,
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        regime = row.get("regime") or "unknown"
+        for column in return_columns:
+            if column in row and row.get(column) not in (None, ""):
+                grouped[column][regime].append(to_float(row.get(column)))
+
+    output: dict[str, list[dict[str, Any]]] = {}
+    for column in return_columns:
+        output[column] = [
+            {
+                "regime": regime,
+                "n": len(values),
+                "annualReturnPct": annualized_mean_pct(values, periods_per_year),
+                "sharpe": sharpe_ratio(values, periods_per_year),
+                "hitRatePct": hit_rate_pct(values),
+            }
+            for regime, values in sorted(grouped[column].items())
+            if values
+        ]
+    return output
+
+
+def top_week_rows(rows: list[dict[str, str]], return_columns: list[str], limit: int = 4) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    output: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for column in return_columns:
+        parsed: list[dict[str, Any]] = []
+        for row in rows:
+            if column not in row or row.get(column) in (None, ""):
+                continue
+            is_c2c = "_c2c" in column
+            parsed.append(
+                {
+                    "date": row["date"],
+                    "returnPct": to_float(row.get(column)) * 100.0,
+                    "longPct": to_float(row.get("long_ret_c2c" if is_c2c else "long_ret_o2o")) * 100.0,
+                    "shortPct": -to_float(row.get("short_ret_c2c" if is_c2c else "short_ret_o2o")) * 100.0,
+                    "ic": to_float(row.get("ic_c2c" if is_c2c else "ic_o2o")),
+                    "turnover": to_float(row.get("turnover_long")) + to_float(row.get("turnover_short")),
+                    "regime": row.get("regime") or "unknown",
+                }
+            )
+        output[column] = {
+            "best": sorted(parsed, key=lambda item: item["returnPct"], reverse=True)[:limit],
+            "worst": sorted(parsed, key=lambda item: item["returnPct"])[:limit],
+        }
+    return output
+
+
+def top_period_rows(
+    rows_by_key: dict[str, list[dict[str, Any]]],
+    limit: int = 4,
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    return {
+        key: {
+            "best": sorted(rows, key=lambda item: item["returnPct"], reverse=True)[:limit],
+            "worst": sorted(rows, key=lambda item: item["returnPct"])[:limit],
+        }
+        for key, rows in rows_by_key.items()
+    }
+
+
+def decile_profile(rows: list[dict[str, str]], periods_per_year: float) -> dict[str, list[dict[str, Any]]]:
+    profiles: dict[str, list[dict[str, Any]]] = {"c2c": [], "o2o": []}
+    for execution in ("c2c", "o2o"):
+        for decile in range(1, 11):
+            column = f"dec_{decile}_{execution}"
+            values = [to_float(row.get(column)) for row in rows if row.get(column) not in (None, "")]
+            profiles[execution].append(
+                {
+                    "decile": decile,
+                    "annualReturnPct": annualized_mean_pct(values, periods_per_year),
+                    "n": len(values),
+                }
+            )
+    return profiles
+
+
+def concentration_from_selections(rows: list[dict[str, str]], limit: int = 8) -> dict[str, Any]:
+    by_side: dict[str, dict[str, int]] = {"LONG": defaultdict(int), "SHORT": defaultdict(int)}
+    dates_by_side: dict[str, set[str]] = {"LONG": set(), "SHORT": set()}
+    for row in rows:
+        side = (row.get("position_type") or row.get("side") or "").upper()
+        ticker = (row.get("ticker") or "").upper()
+        date = row.get("rebalance_date") or row.get("date") or row.get("signal_date") or ""
+        if side in by_side and ticker:
+            by_side[side][ticker] += 1
+            if date:
+                dates_by_side[side].add(date)
+    return {
+        side.lower(): [
+            {
+                "ticker": ticker,
+                "count": count,
+                "periodPct": count / max(len(dates_by_side[side]), 1) * 100.0,
+            }
+            for ticker, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        ]
+        for side, counts in by_side.items()
+    }
+
+
+def copy_like_summary(root: Path, run_dir: str) -> dict[str, Any] | None:
+    path = root / run_dir / "score_trail5_correlations.csv"
+    if not path.exists():
+        return None
+    rows = read_csv(path)
+    parsed = [
+        {
+            "date": row.get("date"),
+            "side": row.get("pool_side"),
+            "corr": to_float(row.get("score_trail5_spearman")),
+        }
+        for row in rows
+        if row.get("score_trail5_spearman") not in (None, "")
+    ]
+    if not parsed:
+        return None
+    by_side: dict[str, list[float]] = defaultdict(list)
+    for row in parsed:
+        by_side[str(row["side"])].append(float(row["corr"]))
+    return {
+        "n": len(parsed),
+        "avgAbsCorr": mean(abs(float(row["corr"])) for row in parsed),
+        "highAbsCorrCount": sum(1 for row in parsed if abs(float(row["corr"])) > 0.9),
+        "bySide": [
+            {
+                "side": side,
+                "avgCorr": mean(values),
+                "avgAbsCorr": mean(abs(value) for value in values),
+                "highAbsCorrCount": sum(1 for value in values if abs(value) > 0.9),
+            }
+            for side, values in sorted(by_side.items())
+        ],
+        "top": sorted(parsed, key=lambda row: abs(float(row["corr"])), reverse=True)[:10],
+    }
+
+
+def score_spread_summary(rows: list[dict[str, str]]) -> dict[str, Any] | None:
+    llm_rows = [
+        row
+        for row in rows
+        if (row.get("score_provider") or "").lower() == "llm" and row.get("llm_score") not in (None, "")
+    ]
+    if not llm_rows:
+        return None
+    by_side: dict[str, list[float]] = defaultdict(list)
+    by_date: dict[str, list[float]] = defaultdict(list)
+    for row in llm_rows:
+        score = to_float(row.get("llm_score"))
+        by_side[row.get("pool_side") or "unknown"].append(score)
+        by_date[row["date"]].append(score)
+    date_spreads = [max(values) - min(values) for values in by_date.values() if values]
+    return {
+        "n": len(llm_rows),
+        "avgDateSpread": mean(date_spreads) if date_spreads else None,
+        "bySide": [
+            {
+                "side": side,
+                "avgScore": mean(values),
+                "minScore": min(values),
+                "maxScore": max(values),
+            }
+            for side, values in sorted(by_side.items())
+        ],
+    }
+
+
 def build_legacy_series(root: Path) -> list[dict[str, Any]]:
     config = read_json(root / "run_config.json")
     leaderboard = read_csv(root / "compact_leaderboard.csv")
@@ -219,12 +418,22 @@ def build_legacy_series(root: Path) -> list[dict[str, Any]]:
 
     for row in leaderboard:
         score_type = row["score_type"]
+        if score_type in EXCLUDED_LEGACY_SCORE_TYPES:
+            continue
         pnl_path = root / score_type / "factor_pnl.csv"
         pnl_rows = read_csv(pnl_path)
+        selection_path = root / score_type / "portfolio_selections.csv"
+        selection_rows = read_csv(selection_path) if selection_path.exists() else []
         returns_by_key: dict[str, list[float]] = {option["key"]: [] for option in LEGACY_COST_OPTIONS}
         long_leg_returns_by_key: dict[str, list[float]] = {option["key"]: [] for option in LEGACY_COST_OPTIONS}
         short_leg_returns_by_key: dict[str, list[float]] = {option["key"]: [] for option in LEGACY_COST_OPTIONS}
+        top_periods_by_key: dict[str, list[dict[str, Any]]] = {
+            option["key"]: [] for option in LEGACY_COST_OPTIONS
+        }
         yearly_returns: dict[str, dict[str, list[float]]] = {
+            option["key"]: defaultdict(list) for option in LEGACY_COST_OPTIONS
+        }
+        regime_returns: dict[str, dict[str, list[float]]] = {
             option["key"]: defaultdict(list) for option in LEGACY_COST_OPTIONS
         }
         growth_by_key: dict[str, float] = {option["key"]: 1.0 for option in LEGACY_COST_OPTIONS}
@@ -238,6 +447,7 @@ def build_legacy_series(root: Path) -> list[dict[str, Any]]:
             gross_long_bps = to_float(pnl.get("long_pnl_bps")) + turnover_long * configured_cost_bps
             gross_short_bps = to_float(pnl.get("short_pnl_bps")) + turnover_short * configured_cost_bps
             year = pnl["date"][:4]
+            regime = pnl.get("regime") or "unknown"
             values: dict[str, Any] = {}
             for option in LEGACY_COST_OPTIONS:
                 key = option["key"]
@@ -249,6 +459,19 @@ def build_legacy_series(root: Path) -> list[dict[str, Any]]:
                 long_leg_returns_by_key[key].append(long_ret)
                 short_leg_returns_by_key[key].append(short_ret)
                 yearly_returns[key][year].append(ret)
+                regime_returns[key][regime].append(ret)
+                top_periods_by_key[key].append(
+                    {
+                        "date": pnl["date"],
+                        "returnPct": ret * 100.0,
+                        "longPct": long_ret * 100.0,
+                        "shortPct": short_ret * 100.0,
+                        "ic": None,
+                        "turnover": turnover_total,
+                        "regime": regime,
+                        "basis": "daily",
+                    }
+                )
                 growth_by_key[key] *= 1.0 + ret
                 values[key] = {
                     "ret": ret,
@@ -313,6 +536,27 @@ def build_legacy_series(root: Path) -> list[dict[str, Any]]:
                 "metrics": metrics,
                 "yearly": yearly,
                 "components": components,
+                "diagnostics": {
+                    "drawdowns": {
+                        option["key"]: drawdown_points(points, str(option["key"]))
+                        for option in LEGACY_COST_OPTIONS
+                    },
+                    "regimes": {
+                        option["key"]: [
+                            {
+                                "regime": regime,
+                                "n": len(values),
+                                "annualReturnPct": annualized_mean_pct(values, TRADING_DAYS),
+                                "sharpe": sharpe_ratio(values, TRADING_DAYS),
+                                "hitRatePct": hit_rate_pct(values),
+                            }
+                            for regime, values in sorted(regime_returns[str(option["key"])].items())
+                        ]
+                        for option in LEGACY_COST_OPTIONS
+                    },
+                    "topPeriods": top_period_rows(top_periods_by_key),
+                    "concentration": concentration_from_selections(selection_rows),
+                },
             }
         )
 
@@ -420,6 +664,12 @@ def build_v1_series(
         base_label = str(run["label"]).removeprefix("V1 ").format(book=book)
         label = f"{label_prefix} {base_label}" if label_prefix != "V1" else str(run["label"]).format(book=book)
         weekly_rows = read_csv(root / run_dir / "weekly_returns.csv")
+        signal_rows = read_csv(root / run_dir / "signal_checks.csv") if (root / run_dir / "signal_checks.csv").exists() else []
+        selection_rows = (
+            read_csv(root / run_dir / "portfolio_selections.csv")
+            if (root / run_dir / "portfolio_selections.csv").exists()
+            else []
+        )
         growth_by_key = {option["key"]: 1.0 for option in V1_RETURN_OPTIONS}
         leg_returns_by_key = {
             str(option["key"]): {"long": [], "short": []}
@@ -519,6 +769,26 @@ def build_v1_series(
                         "shortAnnPct": annualized_mean_pct(leg_returns_by_key[str(option["key"])]["short"], WEEKLY_PERIODS),
                     }
                     for option in V1_RETURN_OPTIONS
+                },
+                "diagnostics": {
+                    "drawdowns": {
+                        str(option["key"]): drawdown_points(points, str(option["key"]))
+                        for option in V1_RETURN_OPTIONS
+                    },
+                    "regimes": regime_breakdown(
+                        weekly_rows,
+                        [str(option["key"]) for option in V1_RETURN_OPTIONS],
+                        WEEKLY_PERIODS,
+                    ),
+                    "rollingIc": {
+                        "c2c": rolling_mean_points(weekly_rows, "ic_c2c", 13),
+                        "o2o": rolling_mean_points(weekly_rows, "ic_o2o", 13),
+                    },
+                    "deciles": decile_profile(weekly_rows, WEEKLY_PERIODS),
+                    "topWeeks": top_week_rows(weekly_rows, [str(option["key"]) for option in V1_RETURN_OPTIONS]),
+                    "concentration": concentration_from_selections(selection_rows),
+                    "copyLike": copy_like_summary(root, run_dir),
+                    "scoreSpread": score_spread_summary(signal_rows),
                 },
             }
         )
@@ -712,6 +982,117 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
     .method-card p {{
       font-size: 13px;
     }}
+    .analysis-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0 0 14px;
+    }}
+    .analysis-card {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 15px;
+    }}
+    .analysis-card h2 {{
+      margin-bottom: 6px;
+    }}
+    .analysis-card p {{
+      font-size: 13px;
+      margin-bottom: 8px;
+    }}
+    .analysis-list {{
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.38;
+    }}
+    .analysis-list li {{
+      margin: 5px 0;
+    }}
+    .trace-control {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 10px 0 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+    }}
+    .trace-control label {{
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }}
+    .trace-control select {{
+      min-width: min(520px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      color: var(--ink);
+      background: #fff;
+      font-weight: 750;
+    }}
+    .trace-grid {{
+      display: grid;
+      grid-template-columns: 1.1fr 1.1fr .9fr;
+      gap: 12px;
+      margin-bottom: 12px;
+    }}
+    .trace-card {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fff;
+    }}
+    .trace-card h3 {{
+      font-size: 16px;
+      margin-bottom: 8px;
+    }}
+    .trace-row {{
+      display: grid;
+      grid-template-columns: 112px 1fr;
+      gap: 10px;
+      padding: 8px 0;
+      border-top: 1px solid #eef2f7;
+      font-size: 13px;
+      line-height: 1.35;
+    }}
+    .trace-row:first-of-type {{
+      border-top: 0;
+    }}
+    .trace-row span {{
+      color: var(--muted);
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+      font-size: 11px;
+    }}
+    .verdict-box {{
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      line-height: 1.4;
+      border: 1px solid var(--line);
+      background: #fff;
+    }}
+    .verdict-box.good {{
+      border-color: #9bcdbf;
+      background: #f0faf6;
+    }}
+    .verdict-box.warn {{
+      border-color: #e5c785;
+      background: #fff8e7;
+    }}
+    .verdict-box.bad {{
+      border-color: #df9aa4;
+      background: #fff1f3;
+    }}
     .guide-grid {{
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -801,7 +1182,9 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
       overflow: visible;
     }}
     #growthChart {{ height: 475px; }}
-    #qualityChart, #legChart {{ height: 340px; }}
+    #qualityChart, #legChart, #decileChart, #costChart {{ height: 340px; }}
+    #rollingIcChart {{ height: 520px; }}
+    #copyChart {{ height: 310px; }}
     .axis {{ fill: var(--muted); font-size: 11px; }}
     .gridline {{ stroke: #e9eef4; stroke-width: 1; }}
     .axis-line {{ stroke: #a8b4c3; stroke-width: 1; }}
@@ -952,8 +1335,69 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
       font-variant-numeric: tabular-nums;
       font-weight: 650;
     }}
+    .mini-table {{
+      width: 100%;
+      min-width: 0;
+      font-size: 12px;
+    }}
+    .mini-table th, .mini-table td {{
+      padding: 7px 8px;
+      white-space: normal;
+    }}
+    .mini-table td:first-child, .mini-table th:first-child {{
+      position: static;
+    }}
+    .split-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .delta-pos {{ color: var(--good); font-weight: 800; }}
+    .delta-neg {{ color: var(--bad); font-weight: 800; }}
+    .regime-matrix {{
+      display: grid;
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+    .regime-row {{
+      display: grid;
+      grid-template-columns: 145px repeat(var(--regime-count), minmax(74px, 1fr));
+      gap: 6px;
+      align-items: stretch;
+    }}
+    .regime-cell {{
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 7px 8px;
+      min-height: 42px;
+      font-size: 12px;
+      line-height: 1.15;
+    }}
+    .regime-cell strong {{
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+    }}
+    .table-swatch {{
+      display: inline-block;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      margin-right: 8px;
+      vertical-align: -1px;
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 1px var(--line);
+    }}
+    .regime-head {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      background: var(--soft);
+    }}
     @media (max-width: 980px) {{
-      header, .layout, .detail-grid, .guide-grid {{ display: block; }}
+      header, .layout, .detail-grid, .guide-grid, .analysis-grid, .split-grid, .trace-grid {{ display: block; }}
       .controls {{ margin-top: 14px; }}
       .cards, .method-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .panel {{ margin-top: 14px; }}
@@ -979,6 +1423,7 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
 
     <section class="cards" id="summaryCards" aria-label="Best-of summary"></section>
     <section class="method-grid" id="methodCards" aria-label="Methodology notes"></section>
+    <section class="analysis-grid" id="analysisCards" aria-label="Interpretive analysis notes"></section>
 
     <section class="guide-grid" aria-label="Experiment guide">
       <div class="guide-card">
@@ -1013,6 +1458,34 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
       </div>
     </section>
 
+    <section class="panel" style="margin-top:14px;">
+      <div class="panel-head">
+        <div>
+          <h2>Run Explainability / Sanity Check</h2>
+          <p>Pick one run to see exactly what changed, what stayed controlled, and which comparison should be used for attribution.</p>
+        </div>
+      </div>
+      <div class="trace-control">
+        <label for="traceRunSelect">Run To Explain</label>
+        <select id="traceRunSelect"></select>
+      </div>
+      <div class="trace-grid">
+        <div class="trace-card" id="traceSummary"></div>
+        <div class="trace-card" id="controlSummary"></div>
+        <div class="trace-card" id="verdictSummary"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="mini-table" id="controlDiffTable"></table>
+      </div>
+      <details style="margin-top:12px;">
+        <summary style="cursor:pointer;font-weight:800;color:var(--ink);">Show deterministic 5-day MR baseline rows</summary>
+        <div class="table-wrap" style="margin-top:10px;">
+          <table class="mini-table" id="baselineTable"></table>
+        </div>
+      </details>
+      <p class="note">Rule of thumb: only compare an LLM row to its matching deterministic control when universe, candidate pool, book size, rebalance, and P&L path are the same.</p>
+    </section>
+
     <section class="layout">
       <div class="panel">
         <div class="panel-head">
@@ -1041,6 +1514,9 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
           </div>
         </div>
         <svg id="qualityChart" role="img" aria-label="Sharpe versus IC scatter plot"></svg>
+        <div class="table-wrap" style="margin-top:10px;">
+          <table class="mini-table" id="qualityTable"></table>
+        </div>
       </div>
       <div class="panel">
         <div class="panel-head">
@@ -1050,6 +1526,111 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
           </div>
         </div>
         <svg id="legChart" role="img" aria-label="Long versus short annualized contribution chart"></svg>
+      </div>
+    </section>
+
+    <section class="detail-grid">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>LLM Delta vs Baselines</h2>
+            <p>Positive means the LLM row beats the matching deterministic baseline in the selected view.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="mini-table" id="deltaTable"></table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Cost Fragility</h2>
+            <p>Gross, 2.5 bps, and 5 bps Sharpe for the visible V1 runs under the selected execution family.</p>
+          </div>
+        </div>
+        <svg id="costChart" role="img" aria-label="Cost sensitivity chart"></svg>
+      </div>
+    </section>
+
+    <section class="detail-grid">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Rolling IC</h2>
+            <p id="focusRollingNote">13-week rolling mean IC for every V1 run with saved weekly IC diagnostics. Legacy rows do not have comparable rolling IC paths in the old harness.</p>
+          </div>
+        </div>
+        <svg id="rollingIcChart" role="img" aria-label="Rolling IC chart"></svg>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>IC Readout</h2>
+            <p id="focusIcNote">Latest and average rolling IC values for every V1 run with saved weekly IC diagnostics.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="mini-table" id="rollingIcTable"></table>
+        </div>
+      </div>
+    </section>
+
+    <section class="detail-grid">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Score Decile Monotonicity</h2>
+            <p id="focusDecileNote">Decile spread for every V1 run with saved score-decile buckets. Legacy rows do not have comparable decile bucket diagnostics.</p>
+          </div>
+        </div>
+        <svg id="decileChart" role="img" aria-label="Score decile monotonicity chart"></svg>
+        <div class="table-wrap"><table class="mini-table" id="decileTable"></table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Copy-Likeness</h2>
+            <p>LLM score rank correlation to Trail5 inside the candidate pool. High absolute values mean less independent signal.</p>
+          </div>
+        </div>
+        <svg id="copyChart" role="img" aria-label="LLM copy-likeness chart"></svg>
+      </div>
+    </section>
+
+    <section class="detail-grid">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Regime Breakdown</h2>
+            <p>Heatmap shows annualized return by regime. The table keeps the exact Sharpe, hit rate, and sample size.</p>
+          </div>
+        </div>
+        <div class="regime-matrix" id="regimeMatrix"></div>
+        <div class="table-wrap">
+          <table class="mini-table" id="regimeTable"></table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Ticker Concentration</h2>
+            <p>Most repeated names by side for every run with saved portfolio selections.</p>
+          </div>
+        </div>
+        <div class="table-wrap"><table class="mini-table" id="concentrationTable"></table></div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:14px;">
+      <div class="panel-head">
+        <div>
+          <h2>Best and Worst Weeks</h2>
+          <p>Largest positive and negative periods across all runs. V1 rows are weekly windows; legacy rows are daily MTM rows.</p>
+        </div>
+      </div>
+      <div class="split-grid">
+        <div class="table-wrap"><table class="mini-table" id="bestWeeksTable"></table></div>
+        <div class="table-wrap"><table class="mini-table" id="worstWeeksTable"></table></div>
       </div>
     </section>
 
@@ -1108,11 +1689,30 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
     const metricSelect = document.getElementById("metricSelect");
     const summaryCards = document.getElementById("summaryCards");
     const methodCards = document.getElementById("methodCards");
+    const analysisCards = document.getElementById("analysisCards");
+    const traceRunSelect = document.getElementById("traceRunSelect");
+    const traceSummary = document.getElementById("traceSummary");
+    const controlSummary = document.getElementById("controlSummary");
+    const verdictSummary = document.getElementById("verdictSummary");
+    const controlDiffTable = document.getElementById("controlDiffTable");
+    const baselineTable = document.getElementById("baselineTable");
     const growthSubtitle = document.getElementById("growthSubtitle");
     const tableSubtitle = document.getElementById("tableSubtitle");
     const leaderboardBody = document.getElementById("leaderboardBody");
     const yearlyTable = document.getElementById("yearlyTable");
     const contextRows = document.getElementById("contextRows");
+    const focusRollingNote = document.getElementById("focusRollingNote");
+    const focusIcNote = document.getElementById("focusIcNote");
+    const focusDecileNote = document.getElementById("focusDecileNote");
+    const qualityTable = document.getElementById("qualityTable");
+    const deltaTable = document.getElementById("deltaTable");
+    const rollingIcTable = document.getElementById("rollingIcTable");
+    const decileTable = document.getElementById("decileTable");
+    const regimeMatrix = document.getElementById("regimeMatrix");
+    const regimeTable = document.getElementById("regimeTable");
+    const concentrationTable = document.getElementById("concentrationTable");
+    const bestWeeksTable = document.getElementById("bestWeeksTable");
+    const worstWeeksTable = document.getElementById("worstWeeksTable");
 
     function selectedKey(series) {{
       if (series.kind !== "legacy") return metricSelect.value;
@@ -1132,6 +1732,35 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
 
     function component(series) {{
       return series.components[selectedKey(series)] || {{}};
+    }}
+
+    function diagnostics(series) {{
+      return series.diagnostics || {{}};
+    }}
+
+    function executionFamily() {{
+      return metricSelect.value.includes("_o2o_") ? "o2o" : "c2c";
+    }}
+
+    function costKey(costLabel) {{
+      const family = executionFamily();
+      return `ls_${{family}}_${{costLabel}}`;
+    }}
+
+    function renderFocusNotes() {{
+      focusRollingNote.textContent = "All V1 rows with weekly rolling IC diagnostics. Legacy rows are excluded because factor_pnl.csv only has daily P&L and aggregate IC, not a saved date-by-date IC series.";
+      focusIcNote.textContent = "All V1 rows with weekly rolling IC diagnostics. This is a V1-only diagnostic because the legacy harness did not save comparable rolling IC paths.";
+      focusDecileNote.textContent = "All V1 rows with saved score-decile buckets. This is V1-only because the legacy harness did not save comparable score-decile bucket returns.";
+    }}
+
+    function matchingV1Baseline(series, kind) {{
+      if (!series) return null;
+      const parts = series.id.split(":");
+      if (parts.length < 3) return null;
+      const variant = parts[1];
+      const runDir = kind === "pool" ? "baseline_pool" : "baseline_universe";
+      return DATA.series.find((candidate) => candidate.id === `v1:${{variant}}:${{runDir}}`)
+        || DATA.series.find((candidate) => candidate.id === `v1:pos75:${{runDir}}`);
     }}
 
     function pct(value, digits = 1) {{
@@ -1178,6 +1807,7 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
       }});
       metricSelect.value = "ls_c2c_5";
       metricSelect.addEventListener("change", renderAll);
+      renderTraceControls();
     }}
 
     function bestBy(field) {{
@@ -1261,6 +1891,405 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
           <span>${{card.label}}</span>
           <strong>${{card.title}}</strong>
           <p>${{card.text}}</p>
+        </div>
+      `).join("");
+    }}
+
+    function renderBaselineTable() {{
+      const rows = DATA.series
+        .filter((series) => (
+          series.id.includes("mean_reversion_")
+          || series.id.includes(":baseline_universe")
+          || series.id.includes(":baseline_pool")
+        ))
+        .sort((a, b) => {{
+          const kindRank = a.kind === b.kind ? 0 : (a.kind === "legacy" ? -1 : 1);
+          return kindRank || metric(b).sharpe - metric(a).sharpe;
+        }});
+      const baselineType = (series) => {{
+        if (series.id.includes("mean_reversion_raw_score")) return "Legacy deterministic raw MR";
+        if (series.id.includes(":baseline_universe")) return "V1 deterministic full-universe deciles";
+        if (series.id.includes(":baseline_pool")) return "V1 deterministic Trail5 inside pool";
+        return "Deterministic baseline";
+      }};
+      const head = `<thead><tr><th>Baseline</th><th>What It Tests</th><th>Harness</th><th>Sharpe</th><th>CAGR</th><th>IC</th><th>Max DD</th><th>N</th></tr></thead>`;
+      const body = rows.map((series) => {{
+        const m = metric(series);
+        return `
+          <tr>
+            <td class="name">${{compactLabel(series.label)}}</td>
+            <td>${{baselineType(series)}}</td>
+            <td>${{series.kind === "legacy" ? "legacy daily factor path" : "V1 weekly path"}}</td>
+            <td>${{num(m.sharpe, 2)}}</td>
+            <td>${{pct(m.cagrPct)}}</td>
+            <td>${{num(m.icMean, 4)}}</td>
+            <td>${{pct(m.maxDrawdownPct)}}</td>
+            <td>${{m.nPeriods}}</td>
+          </tr>
+        `;
+      }}).join("");
+      baselineTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
+    }}
+
+    function traceRowsHtml(rows) {{
+      return rows.map(([label, value]) => `
+        <div class="trace-row"><span>${{label}}</span><strong>${{value}}</strong></div>
+      `).join("");
+    }}
+
+    function traceDetails(series) {{
+      const details = Object.fromEntries((series.setupDetails || []).map((row) => [row.label, row.value]));
+      const id = series.id;
+      const isLegacy = series.kind === "legacy";
+      const isLegacyLlm = isLegacy && id.includes("llm_");
+      const isLegacyDet = isLegacy && id.includes("mean_reversion_");
+      const isV1 = series.kind === "v1";
+      const isV1Llm = isV1 && id.includes(":llm_pool_v1");
+      const isV1Pool = isV1 && id.includes(":baseline_pool");
+      const isV1Universe = isV1 && id.includes(":baseline_universe");
+      const variant = isV1 ? id.split(":")[1] : "";
+      const poolText = details.Pool || (variant.includes("pool60") ? "60 losers + 60 winners" : "150 losers + 150 winners");
+      const bookText = details.Book || (isLegacy ? `${{DATA.legacyMeta.topN}}/${{DATA.legacyMeta.bottomN}} equal-weight book` : "matched V1 book");
+
+      if (isLegacyDet) {{
+        return {{
+          title: compactLabel(series.label),
+          universe: "Legacy Russell membership-gated composite-score universe.",
+          candidates: `${{DATA.legacyMeta.candidatePerSide}} oversold + ${{DATA.legacyMeta.candidatePerSide}} overbought from the 5-day mean-reversion signal.`,
+          inputs: "No LLM. Deterministic raw MR score or deterministic MR rank.",
+          output: "Score column consumed directly by the legacy factor harness.",
+          book: `${{DATA.legacyMeta.topN}}/${{DATA.legacyMeta.bottomN}} equal-weight book.`,
+          path: "Rebalance every 5 trading days; daily marked-to-market P&L; costs reconstructed from gross P&L plus turnover.",
+          use: "Old-harness deterministic 5-day MR baseline."
+        }};
+      }}
+
+      if (isLegacyLlm) {{
+        return {{
+          title: compactLabel(series.label),
+          universe: "Same legacy Russell membership-gated composite-score universe.",
+          candidates: `${{DATA.legacyMeta.candidatePerSide}} D1 losers + ${{DATA.legacyMeta.candidatePerSide}} D10 winners in the saved run.`,
+          inputs: "Ticker, MRL, MRS, Trail5, MRSig, VixPctl, VolPctl, VIX, VolImb, M2/M1, ATR, RV10, VAT_MA, Rng55, 52WH, Rng%, AutoC, Mom3m, RSI5, Vel/V, D52WH, VATSlo, %MA100, ADX.",
+          output: "LLM returns rank + confidence_score; writer derives raw-confidence, rank, and rank*confidence score columns.",
+          book: `${{DATA.legacyMeta.topN}}/${{DATA.legacyMeta.bottomN}} equal-weight book.`,
+          path: "Rebalance every 5 trading days; daily marked-to-market P&L; costs reconstructed from gross P&L plus turnover.",
+          use: "Legacy-internal LLM-vs-deterministic signal comparison, not clean legacy-vs-V1 attribution."
+        }};
+      }}
+
+      if (isV1Universe) {{
+        return {{
+          title: compactLabel(series.label),
+          universe: "V1 Russell 1000 filtered universe with price, liquidity, and data-validity screens.",
+          candidates: "Full valid universe decile legs: D1 losers long and D10 winners short.",
+          inputs: "No LLM. Deterministic 5-day reversal signal from Trail5/decile construction.",
+          output: "Deterministic decile selection.",
+          book: "Full decile basket, not an LLM-scored pool.",
+          path: "Weekly Friday-style rebalance; fixed 5-trading-day holding windows; direct gross/2.5/5 bps overlays.",
+          use: "V1 full-universe deterministic 5-day MR baseline."
+        }};
+      }}
+
+      if (isV1Pool) {{
+        return {{
+          title: compactLabel(series.label),
+          universe: "Same V1 filtered universe as its paired LLM run.",
+          candidates: poolText,
+          inputs: "No LLM. Deterministic Trail5 rank inside the candidate pool.",
+          output: "Deterministic pool ranking.",
+          book: bookText,
+          path: "Same weekly 5-trading-day return path as paired LLM row.",
+          use: "Main control for whether a paired V1 LLM scorer adds value."
+        }};
+      }}
+
+      if (isV1Llm) {{
+        return {{
+          title: compactLabel(series.label),
+          universe: "Same V1 filtered universe as the paired Baseline-Pool.",
+          candidates: poolText,
+          inputs: "Ticker, MRL, MRS, Trail5, MRSig, RSI5, Rng55, Vel/V, %MA100, 52WH, Mom3m, AutoC, ADX, VolPctl.",
+          output: series.family.includes("Rank + Confidence")
+            ? "LLM returns side-relative rank + confidence_score, then normalizes to score."
+            : "LLM returns one 0-100 score for every candidate ticker.",
+          book: bookText,
+          path: "Weekly Friday-style rebalance; fixed 5-trading-day holding windows; direct gross/2.5/5 bps overlays.",
+          use: "Compare to matching V1 Baseline-Pool to isolate LLM scoring."
+        }};
+      }}
+
+      return {{
+        title: compactLabel(series.label),
+        universe: series.setup || "n/a",
+        candidates: "n/a",
+        inputs: "n/a",
+        output: "n/a",
+        book: "n/a",
+        path: series.periodBasis || "n/a",
+        use: "n/a"
+      }};
+    }}
+
+    function controlFor(series) {{
+      if (!series) return null;
+      const id = series.id;
+      if (series.kind === "v1" && id.includes(":llm_pool_v1")) return matchingV1Baseline(series, "pool");
+      if (series.kind === "v1" && id.includes(":baseline_pool")) return matchingV1Baseline(series, "universe");
+      if (series.kind === "legacy" && id.includes("llm_raw_confidence_score")) return runById("mean_reversion_raw_score");
+      if (series.kind === "legacy" && id.includes("llm_rank")) return runById("mean_reversion_raw_score");
+      return null;
+    }}
+
+    function verdictFor(series, control) {{
+      if (!series) return {{ klass: "warn", title: "No run selected", text: "Choose a run to see attribution guidance." }};
+      const m = metric(series);
+      if (series.kind === "v1" && series.id.includes(":llm_pool_v1") && control) {{
+        const b = metric(control);
+        const ds = m.sharpe - b.sharpe;
+        return {{
+          klass: ds >= 0 ? "good" : "warn",
+          title: "Clean V1 LLM Attribution",
+          text: `Compare this run to ${{compactLabel(control.label)}}. Universe, pool, book, rebalance, and P&L path are controlled; the main changed layer is LLM scoring. Current delta: ${{ds >= 0 ? "+" : ""}}${{ds.toFixed(2)}} Sharpe and ${{pct(m.cagrPct - b.cagrPct)}} CAGR.`
+        }};
+      }}
+      if (series.kind === "v1" && series.id.includes(":baseline_pool")) {{
+        return {{
+          klass: "warn",
+          title: "Pool/Book Control",
+          text: control
+            ? `Compare to ${{compactLabel(control.label)}} to understand pool-filter effects, but note the book construction is not identical. This is not an LLM-alpha comparison.`
+            : "This is a deterministic pool baseline. Its best use is as the paired control for the matching LLM-Pool row."
+        }};
+      }}
+      if (series.kind === "v1" && series.id.includes(":baseline_universe")) {{
+        return {{
+          klass: "good",
+          title: "Pure V1 MR Baseline",
+          text: "No LLM is involved. This is the clean full-universe 5-day reversal benchmark inside the V1 weekly harness."
+        }};
+      }}
+      if (series.kind === "legacy" && series.id.includes("llm_")) {{
+        return {{
+          klass: "warn",
+          title: "Legacy-Internal LLM Comparison",
+          text: control
+            ? `Compare to ${{compactLabel(control.label)}} for old-harness context. Do not use this as proof versus V1: legacy has richer LLM features, rank/confidence output, daily MTM accounting, and a different harness.`
+            : "Legacy LLM row. Useful for historical context, but not directly comparable to V1 for isolated LLM alpha."
+        }};
+      }}
+      if (series.kind === "legacy") {{
+        return {{
+          klass: "good",
+          title: "Pure Legacy MR Baseline",
+          text: "No LLM is involved. This is the old factor-harness deterministic 5-day mean-reversion baseline."
+        }};
+      }}
+      return {{ klass: "warn", title: "Attribution unclear", text: "Use the closest matching deterministic control before making an alpha claim." }};
+    }}
+
+    function renderTraceControls() {{
+      const previous = traceRunSelect.value;
+      const rows = [...DATA.series].sort((a, b) => {{
+        const groupA = a.kind === "legacy" ? 0 : 1;
+        const groupB = b.kind === "legacy" ? 0 : 1;
+        return groupA - groupB || compactLabel(a.label).localeCompare(compactLabel(b.label));
+      }});
+      traceRunSelect.innerHTML = rows.map((series) => `
+        <option value="${{series.id}}">${{compactLabel(series.label)}} · ${{series.kind === "legacy" ? "Legacy" : "V1"}}</option>
+      `).join("");
+      const preferred = rows.find((series) => series.id.includes("rank_conf_pool60_pos30:llm_pool_v1"))
+        || rows.find((series) => series.id.includes(":llm_pool_v1"))
+        || rows[0];
+      traceRunSelect.value = previous && DATA.series.some((series) => series.id === previous) ? previous : preferred.id;
+      if (!traceRunSelect.dataset.bound) {{
+        traceRunSelect.addEventListener("change", renderRunTrace);
+        traceRunSelect.dataset.bound = "1";
+      }}
+    }}
+
+    function renderRunTrace() {{
+      const series = DATA.series.find((item) => item.id === traceRunSelect.value) || DATA.series[0];
+      const control = controlFor(series);
+      const trace = traceDetails(series);
+      const controlTrace = control ? traceDetails(control) : null;
+      const verdict = verdictFor(series, control);
+      const m = metric(series);
+      traceSummary.innerHTML = `
+        <h3>${{trace.title}}</h3>
+        ${{traceRowsHtml([
+          ["Sharpe", `${{num(m.sharpe, 2)}} / CAGR ${{pct(m.cagrPct)}}`],
+          ["Universe", trace.universe],
+          ["Candidates", trace.candidates],
+          ["Inputs", trace.inputs],
+          ["Output", trace.output],
+          ["Book", trace.book],
+          ["Rebalance", trace.path],
+        ])}}
+      `;
+      controlSummary.innerHTML = controlTrace ? `
+        <h3>Best Control: ${{controlTrace.title}}</h3>
+        ${{traceRowsHtml([
+          ["Why", trace.use],
+          ["Control", controlTrace.use],
+          ["Universe", controlTrace.universe],
+          ["Candidates", controlTrace.candidates],
+          ["Inputs", controlTrace.inputs],
+          ["Book", controlTrace.book],
+          ["Rebalance", controlTrace.path],
+        ])}}
+      ` : `
+        <h3>No Direct Control</h3>
+        ${{traceRowsHtml([
+          ["Why", trace.use],
+          ["Read As", "Baseline or context row, not an isolated LLM-alpha test."],
+          ["Next Step", "Compare an LLM row to its matching deterministic pool baseline."],
+        ])}}
+      `;
+      verdictSummary.innerHTML = `
+        <h3>Attribution Verdict</h3>
+        <div class="verdict-box ${{verdict.klass}}">
+          <strong>${{verdict.title}}</strong><br>
+          ${{verdict.text}}
+        </div>
+      `;
+
+      const diffRows = controlTrace ? [
+        ["Universe", trace.universe, controlTrace.universe, trace.universe === controlTrace.universe ? "Controlled" : "Different"],
+        ["Candidate Pool", trace.candidates, controlTrace.candidates, trace.candidates === controlTrace.candidates ? "Controlled" : "Different"],
+        ["Signals / Scorer", trace.inputs, controlTrace.inputs, "Changed by design"],
+        ["Output", trace.output, controlTrace.output, "Changed by design"],
+        ["Book", trace.book, controlTrace.book, trace.book === controlTrace.book ? "Controlled" : "Different"],
+        ["Rebalance / P&L", trace.path, controlTrace.path, trace.path === controlTrace.path ? "Controlled" : "Different"],
+      ] : [];
+      if (!diffRows.length) {{
+        controlDiffTable.innerHTML = "";
+        return;
+      }}
+      const head = `<thead><tr><th>Dimension</th><th>This Run</th><th>Control</th><th>Status</th></tr></thead>`;
+      const body = diffRows.map(([dim, left, right, status]) => `
+        <tr>
+          <td class="name">${{dim}}</td>
+          <td>${{left}}</td>
+          <td>${{right}}</td>
+          <td>${{status}}</td>
+        </tr>
+      `).join("");
+      controlDiffTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
+    }}
+
+    function runById(fragment) {{
+      return DATA.series.find((series) => series.id.includes(fragment));
+    }}
+
+    function deltaText(llm, baseline) {{
+      if (!llm || !baseline) return "n/a";
+      const dm = metric(llm).sharpe - metric(baseline).sharpe;
+      const dc = metric(llm).cagrPct - metric(baseline).cagrPct;
+      return `${{dm >= 0 ? "+" : ""}}${{dm.toFixed(2)}} Sharpe, ${{dc >= 0 ? "+" : ""}}${{dc.toFixed(1)}} pct CAGR`;
+    }}
+
+    function copyText(series) {{
+      const copy = diagnostics(series)?.copyLike;
+      if (!copy) return "No Trail5 copy-likeness file for this run.";
+      return `avg |corr| ${{copy.avgAbsCorr.toFixed(2)}}; ${{copy.highAbsCorrCount}} / ${{copy.n}} side-periods above 0.90.`;
+    }}
+
+    function costSharpeDrop(series) {{
+      if (!series || series.kind !== "v1") return null;
+      const gross = series.metrics[costKey("0")]?.sharpe;
+      const net = series.metrics[costKey("5")]?.sharpe;
+      if (gross === undefined || net === undefined) return null;
+      return gross - net;
+    }}
+
+    function promptDeltaBullet(series) {{
+      const baseline = matchingV1Baseline(series, "pool");
+      return `${{series.label}} vs pool: ${{deltaText(series, baseline)}}; copy-likeness ${{copyText(series)}}`;
+    }}
+
+    function renderAnalysisCards() {{
+      const standardLlm75 = runById("pos75:llm_pool_v1");
+      const standardPool75 = runById("pos75:baseline_pool");
+      const standardLlm30 = runById("pos30:llm_pool_v1");
+      const standardPool30 = runById("pos30:baseline_pool");
+      const rawLlm = runById("raw_conf_pool60_pos30:llm_pool_v1");
+      const rawPool = runById("raw_conf_pool60_pos30:baseline_pool");
+      const rankLlm = runById("rank_conf_pool60_pos30:llm_pool_v1");
+      const rankPool = runById("rank_conf_pool60_pos30:baseline_pool");
+      const best = sortedSeries()[0];
+      const v1LlmRows = DATA.series.filter((series) => series.kind === "v1" && series.id.includes(":llm_pool_v1"));
+      const bestV1Llm = [...v1LlmRows].sort((a, b) => metric(b).sharpe - metric(a).sharpe)[0];
+      const worstV1Llm = [...v1LlmRows].sort((a, b) => metric(a).sharpe - metric(b).sharpe)[0];
+      const copyRows = [...v1LlmRows]
+        .filter((series) => diagnostics(series).copyLike)
+        .sort((a, b) => diagnostics(b).copyLike.avgAbsCorr - diagnostics(a).copyLike.avgAbsCorr);
+      const costRows = [...v1LlmRows]
+        .map((series) => ({{ series, drop: costSharpeDrop(series) }}))
+        .filter((row) => row.drop !== null)
+        .sort((a, b) => b.drop - a.drop);
+      const cards = [
+        {{
+          title: "All-Run Read",
+          body: `Across every row, the report separates broad historical context from the clean v1-vs-v1 comparison. The legacy rows still look strongest in this selected view, but the standardized v1 lesson is more important: LLM scoring only helps in some prompt/book setups.`,
+          bullets: [
+            `Current best row: ${{best.label}} with Sharpe ${{num(metric(best).sharpe, 2)}} and CAGR ${{pct(metric(best).cagrPct)}}.`,
+            `Best v1 LLM row: ${{bestV1Llm?.label || "n/a"}} with Sharpe ${{bestV1Llm ? num(metric(bestV1Llm).sharpe, 2) : "n/a"}}.`,
+            `Weakest v1 LLM row: ${{worstV1Llm?.label || "n/a"}} with Sharpe ${{worstV1Llm ? num(metric(worstV1Llm).sharpe, 2) : "n/a"}}.`
+          ]
+        }},
+        {{
+          title: "Prompt Comparisons",
+          body: `The prompt format matters. The standard v1 score prompt is the only one that can look competitive against its deterministic pool baseline; raw-confidence and rank-confidence both degrade the pool comparison in the current selected view.`,
+          bullets: [
+            `Standard v1 75/75 LLM vs pool: ${{deltaText(standardLlm75, standardPool75)}}.`,
+            `Standard v1 30/30 LLM vs pool: ${{deltaText(standardLlm30, standardPool30)}}.`,
+            `Raw-confidence LLM vs pool: ${{deltaText(rawLlm, rawPool)}}.`,
+            `Rank-confidence LLM vs pool: ${{deltaText(rankLlm, rankPool)}}.`
+          ]
+        }},
+        {{
+          title: "Copy-Likeness Insight",
+          body: `Copy-likeness is a key trace. Rank-confidence mostly reconstructs Trail5; raw-confidence is less copy-like but still does not produce better alpha. So both extremes are informative: copying is not enough, and being different is not enough either.`,
+          bullets: [
+            ...copyRows.map((series) => `${{series.label}}: ${{copyText(series)}}`),
+            `Interpretation: the useful signal must improve forward-return ordering, not merely resemble or avoid Trail5.`
+          ]
+        }},
+        {{
+          title: "Cost And Robustness",
+          body: `The v1 rows are meaningfully cost-sensitive because turnover is high. A run can look acceptable gross and become weak at 5 bps, so the 5 bps view is the harsh but more useful read.`,
+          bullets: [
+            ...costRows.map((row) => `${{row.series.label}}: Sharpe drops ${{num(row.drop, 2)}} from gross to 5 bps in the selected execution family.`),
+            `Interpretation: any LLM edge has to clear turnover drag, not just improve gross IC.`
+          ]
+        }},
+        {{
+          title: "Why Some Runs Win",
+          body: `The stronger runs combine decent IC with less harmful book construction and survivable costs. The weaker LLM runs either copy the baseline without improving it, or produce independent-looking scores that do not rank future returns well enough.`,
+          bullets: [
+            `Legacy rows win the broad leaderboard, but they are from the older factor-backtest/composite-score harness: daily marked-to-market P&L, richer LLM rank/confidence composite inputs, 60/60 candidates -> 30/30 held, and costs reconstructed from gross P&L plus turnover.`,
+            `V1 rows are the standardized reversal protocol: weekly Friday-style rebalance rows, fixed 5-trading-day hold, explicit Baseline-Universe/Baseline-Pool/LLM-Pool comparisons, and direct cost overlays on the same weekly return path.`,
+            `Standard v1 LLM rows are the cleanest evidence that the LLM can sometimes help inside the v1 setup.`,
+            `Rank-confidence is the clearest negative result: high Trail5 agreement plus worse net performance.`
+          ]
+        }},
+        {{
+          title: "What To Use LLMs For",
+          body: `The evidence argues against using the LLM as a standalone numeric scorer for opaque technical rows. It may still be useful as a meta-layer around deterministic signals.`,
+          bullets: [
+            `Promising next uses: regime gating, basket review, anomaly filtering, or deciding when to trust/reduce deterministic reversal exposure.`,
+            `Less promising use: asking for one 0-100 alpha score per ticker with no feedback loop.`,
+            `The lower rolling-IC and decile panels intentionally focus on one LLM family at a time; this analysis block is the all-run interpretation.`
+          ]
+        }}
+      ];
+      analysisCards.innerHTML = cards.map((card) => `
+        <div class="analysis-card">
+          <h2>${{card.title}}</h2>
+          <p>${{card.body}}</p>
+          <ul class="analysis-list">
+            ${{card.bullets.map((item) => `<li>${{item}}</li>`).join("")}}
+          </ul>
         </div>
       `).join("");
     }}
@@ -1400,7 +2429,6 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
         .replace("Legacy LLM Raw Confidence", "Legacy raw conf")
         .replace("Legacy LLM Rank + Confidence", "Legacy rank+conf")
         .replace("Legacy LLM Rank", "Legacy rank")
-        .replace("Legacy Det Rank", "Legacy det rank")
         .replace("Legacy Det Raw", "Legacy det raw")
         .replace("V1 Baseline Universe", "V1 universe")
         .replace("V1 Raw Confidence Baseline Pool", "Raw conf pool")
@@ -1467,12 +2495,28 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
           stroke: "#fff",
           "stroke-width": "2"
         }}));
-        svg.appendChild(svgEl("text", {{
-          x: cx + row.r + 4,
-          y: cy + 4,
-          class: "point-label"
-        }}, compactLabel(row.series.label)));
       }});
+      renderQualityTable(rows);
+    }}
+
+    function renderQualityTable(rows) {{
+      const sorted = [...rows].sort((a, b) => b.y - a.y);
+      const head = `<thead><tr><th>Run</th><th>Family</th><th>Sharpe</th><th>Mean IC</th><th>CAGR</th><th>Max DD</th></tr></thead>`;
+      const body = sorted.map((row) => {{
+        const m = metric(row.series);
+        const color = COLORS[row.index % COLORS.length];
+        return `
+          <tr>
+            <td class="name"><span class="table-swatch" style="background:${{color}}"></span>${{compactLabel(row.series.label)}}</td>
+            <td>${{row.series.kind === "legacy" ? "Legacy" : "V1"}}</td>
+            <td>${{num(m.sharpe, 2)}}</td>
+            <td>${{num(m.icMean, 4)}}</td>
+            <td>${{pct(m.cagrPct)}}</td>
+            <td>${{pct(m.maxDrawdownPct)}}</td>
+          </tr>
+        `;
+      }}).join("");
+      qualityTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
     }}
 
     function renderLegChart() {{
@@ -1526,6 +2570,361 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
       svg.appendChild(svgEl("text", {{ x: margin.left, y: 10, class: "axis" }}, "Green = long P&L, blue = short P&L"));
     }}
 
+    function deltaClass(value) {{
+      if (value === null || value === undefined || Number.isNaN(value)) return "";
+      return value >= 0 ? "delta-pos" : "delta-neg";
+    }}
+
+    function renderDeltaTable() {{
+      const llmRows = DATA.series.filter((series) => series.kind === "v1" && series.id.includes(":llm_pool_v1"));
+      const rows = llmRows.flatMap((series) => ["pool", "universe"].map((baselineKind) => {{
+        const baseline = matchingV1Baseline(series, baselineKind);
+        if (!baseline) return null;
+        const m = metric(series);
+        const b = metric(baseline);
+        return {{
+          run: compactLabel(series.label),
+          baseline: baselineKind === "pool" ? "Pool" : "Universe",
+          sharpe: m.sharpe - b.sharpe,
+          cagr: m.cagrPct - b.cagrPct,
+          ic: m.icMean - b.icMean,
+          maxDd: m.maxDrawdownPct - b.maxDrawdownPct,
+          llmSharpe: m.sharpe,
+          baseSharpe: b.sharpe
+        }};
+      }}).filter(Boolean));
+      const head = `<thead><tr><th>LLM Run</th><th>Vs</th><th>LLM Sh</th><th>Base Sh</th><th>Delta Sh</th><th>Delta CAGR</th><th>Delta IC</th><th>DD Diff</th></tr></thead>`;
+      const body = rows.map((row) => `
+        <tr>
+          <td class="name">${{row.run}}</td>
+          <td>${{row.baseline}}</td>
+          <td>${{num(row.llmSharpe, 2)}}</td>
+          <td>${{num(row.baseSharpe, 2)}}</td>
+          <td class="${{deltaClass(row.sharpe)}}">${{num(row.sharpe, 2)}}</td>
+          <td class="${{deltaClass(row.cagr)}}">${{pct(row.cagr)}}</td>
+          <td class="${{deltaClass(row.ic)}}">${{num(row.ic, 4)}}</td>
+          <td class="${{deltaClass(-row.maxDd)}}">${{pct(row.maxDd)}}</td>
+        </tr>
+      `).join("");
+      deltaTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
+    }}
+
+    function renderCostChart() {{
+      const svg = document.getElementById("costChart");
+      svg.innerHTML = "";
+      const rows = DATA.series.filter((series) => series.kind === "v1").slice(-8);
+      const width = 640;
+      const height = 340;
+      const margin = {{ top: 18, right: 26, bottom: 84, left: 50 }};
+      const innerW = width - margin.left - margin.right;
+      const innerH = height - margin.top - margin.bottom;
+      svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+      const keys = [costKey("0"), costKey("2p5"), costKey("5")];
+      const vals = rows.flatMap((series) => keys.map((key) => series.metrics[key]?.sharpe ?? 0));
+      const yMax = Math.max(0.25, ...vals) * 1.15;
+      const y = (value) => margin.top + (1 - value / yMax) * innerH;
+      for (let i = 0; i <= 4; i++) {{
+        const value = yMax * i / 4;
+        const yy = y(value);
+        svg.appendChild(svgEl("line", {{ x1: margin.left, x2: width - margin.right, y1: yy, y2: yy, class: "gridline" }}));
+        svg.appendChild(svgEl("text", {{ x: margin.left - 7, y: yy + 4, "text-anchor": "end", class: "axis" }}, value.toFixed(2)));
+      }}
+      const groupW = innerW / Math.max(rows.length, 1);
+      const barW = Math.min(16, groupW / 4);
+      rows.forEach((series, index) => {{
+        const cx = margin.left + groupW * index + groupW / 2;
+        keys.forEach((key, kIndex) => {{
+          const value = series.metrics[key]?.sharpe ?? 0;
+          const x = cx + (kIndex - 1) * (barW + 3);
+          svg.appendChild(svgEl("rect", {{ x, y: y(value), width: barW, height: height - margin.bottom - y(value), rx: 2, fill: COLORS[kIndex], opacity: "0.85" }}));
+        }});
+        svg.appendChild(svgEl("text", {{ x: cx, y: height - 64, transform: `rotate(35 ${{cx}} ${{height - 64}})`, "text-anchor": "start", class: "axis" }}, compactLabel(series.label)));
+      }});
+      svg.appendChild(svgEl("text", {{ x: width - 152, y: 14, class: "axis" }}, "0 / 2.5 / 5 bps"));
+    }}
+
+    function renderRollingIcChart() {{
+      const svg = document.getElementById("rollingIcChart");
+      svg.innerHTML = "";
+      const width = 640;
+      const family = executionFamily();
+      const rows = DATA.series.filter((series) => diagnostics(series).rollingIc?.[family]?.length);
+      const all = rows.flatMap((series) => diagnostics(series).rollingIc[family].map((point) => ({{ date: new Date(point.date + "T00:00:00"), value: point.value }})));
+      if (!all.length) return;
+      const cols = 3;
+      const cellW = width / cols;
+      const cellH = 142;
+      const height = 34 + Math.ceil(rows.length / cols) * cellH;
+      const pad = {{ top: 26, right: 14, bottom: 24, left: 38 }};
+      const innerW = cellW - pad.left - pad.right;
+      const innerH = cellH - pad.top - pad.bottom;
+      svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+      const minX = Math.min(...all.map((p) => p.date.getTime()));
+      const maxX = Math.max(...all.map((p) => p.date.getTime()));
+      const minY = Math.min(-0.1, ...all.map((p) => p.value));
+      const maxY = Math.max(0.1, ...all.map((p) => p.value));
+      rows.forEach((series, index) => {{
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+        const ox = col * cellW;
+        const oy = 18 + row * cellH;
+        const x = (date) => ox + pad.left + ((date.getTime() - minX) / Math.max(maxX - minX, 1)) * innerW;
+        const y = (value) => oy + pad.top + (1 - ((value - minY) / Math.max(maxY - minY, 0.0001))) * innerH;
+        [minY, 0, maxY].forEach((value) => {{
+          const yy = y(value);
+          svg.appendChild(svgEl("line", {{ x1: ox + pad.left, x2: ox + cellW - pad.right, y1: yy, y2: yy, class: value === 0 ? "axis-line" : "gridline" }}));
+        }});
+        if (col === 0) {{
+          [maxY, 0, minY].forEach((value) => {{
+            const yy = y(value);
+            svg.appendChild(svgEl("text", {{ x: ox + pad.left - 7, y: yy + 4, "text-anchor": "end", class: "axis" }}, value.toFixed(2)));
+          }});
+        }}
+        const points = diagnostics(series).rollingIc[family];
+        const d = points.map((point, pointIndex) => `${{pointIndex ? "L" : "M"}}${{x(new Date(point.date + "T00:00:00")).toFixed(1)}},${{y(point.value).toFixed(1)}}`).join(" ");
+        const isLlm = series.id.includes(":llm_pool_v1");
+        svg.appendChild(svgEl("path", {{
+          d,
+          class: "path v1",
+          stroke: COLORS[index % COLORS.length],
+          "stroke-dasharray": isLlm ? "0" : "5 4",
+          opacity: isLlm ? "0.95" : "0.72"
+        }}));
+        svg.appendChild(svgEl("text", {{ x: ox + pad.left, y: oy + 13, class: "point-label" }}, compactLabel(series.label)));
+        const vals = points.map((point) => point.value);
+        const latest = vals[vals.length - 1];
+        const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+        svg.appendChild(svgEl("text", {{ x: ox + pad.left, y: oy + cellH - 6, class: "axis" }}, `latest ${{num(latest, 3)}} / avg ${{num(avg, 3)}}`));
+      }});
+      renderRollingIcTable(family);
+    }}
+
+    function renderRollingIcTable(family = executionFamily()) {{
+      const rows = sortedSeries().filter((series) => diagnostics(series).rollingIc?.[family]?.length);
+      const head = `<thead><tr><th>Run</th><th>Family</th><th>Latest 13w IC</th><th>Avg 13w IC</th><th>Best</th><th>Worst</th></tr></thead>`;
+      const body = rows.map((series) => {{
+        const points = diagnostics(series).rollingIc[family] || [];
+        const vals = points.map((point) => point.value);
+        const latest = vals[vals.length - 1];
+        const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+        return `
+          <tr>
+            <td class="name">${{compactLabel(series.label)}}</td>
+            <td>${{series.family}}</td>
+            <td>${{num(latest, 4)}}</td>
+            <td>${{num(avg, 4)}}</td>
+            <td>${{vals.length ? num(Math.max(...vals), 4) : "n/a"}}</td>
+            <td>${{vals.length ? num(Math.min(...vals), 4) : "n/a"}}</td>
+          </tr>
+        `;
+      }}).join("");
+      rollingIcTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
+    }}
+
+    function renderDecileChart() {{
+      const svg = document.getElementById("decileChart");
+      svg.innerHTML = "";
+      const family = executionFamily();
+      const rows = sortedSeries()
+        .filter((series) => diagnostics(series).deciles?.[family]?.length)
+        .map((series) => {{
+          const deciles = diagnostics(series).deciles[family] || [];
+          const first = deciles[0]?.annualReturnPct ?? null;
+          const last = deciles[deciles.length - 1]?.annualReturnPct ?? null;
+          return {{ series, spread: first !== null && last !== null ? first - last : null }};
+        }})
+        .filter((row) => row.spread !== null);
+      const width = 640;
+      const height = 340;
+      const margin = {{ top: 18, right: 28, bottom: 112, left: 58 }};
+      const innerW = width - margin.left - margin.right;
+      const innerH = height - margin.top - margin.bottom;
+      svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+      if (!rows.length) return;
+      const minY = Math.min(0, ...rows.map((row) => row.spread ?? 0));
+      const maxY = Math.max(0, ...rows.map((row) => row.spread ?? 0));
+      const pad = Math.max((maxY - minY) * 0.15, 2);
+      const y0 = minY - pad;
+      const y1 = maxY + pad;
+      const x = (idx) => margin.left + innerW * (idx / Math.max(rows.length - 1, 1));
+      const y = (value) => margin.top + (1 - ((value - y0) / (y1 - y0))) * innerH;
+      const zeroY = y(0);
+      [y0, 0, y1].forEach((value) => {{
+        const yy = y(value);
+        svg.appendChild(svgEl("line", {{ x1: margin.left, x2: width - margin.right, y1: yy, y2: yy, class: value === 0 ? "axis-line" : "gridline" }}));
+        svg.appendChild(svgEl("text", {{ x: margin.left - 8, y: yy + 4, "text-anchor": "end", class: "axis" }}, pct(value)));
+      }});
+      svg.appendChild(svgEl("line", {{ x1: margin.left, x2: width - margin.right, y1: zeroY, y2: zeroY, class: "axis-line" }}));
+      rows.forEach((row, idx) => {{
+        const value = row.spread ?? 0;
+        const barW = innerW / rows.length * 0.62;
+        svg.appendChild(svgEl("rect", {{ x: x(idx) - barW / 2, y: y(Math.max(0, value)), width: barW, height: Math.abs(y(value) - zeroY), rx: 2, fill: COLORS[idx % COLORS.length], opacity: "0.86" }}));
+        svg.appendChild(svgEl("text", {{ x: x(idx), y: height - 88, transform: `rotate(35 ${{x(idx)}} ${{height - 88}})`, "text-anchor": "start", class: "axis" }}, compactLabel(row.series.label)));
+      }});
+      svg.appendChild(svgEl("text", {{ x: margin.left, y: 10, class: "axis" }}, "D1 minus D10 annualized return by run"));
+      renderDecileTable();
+    }}
+
+    function renderDecileTable() {{
+      const family = executionFamily();
+      const rows = sortedSeries()
+        .filter((series) => diagnostics(series).deciles?.[family]?.length)
+        .map((series) => {{
+          const deciles = diagnostics(series).deciles[family] || [];
+          const first = deciles[0]?.annualReturnPct ?? null;
+          const last = deciles[deciles.length - 1]?.annualReturnPct ?? null;
+          const values = deciles.map((row) => row.annualReturnPct).filter((value) => value !== null && value !== undefined && !Number.isNaN(value));
+          const spread = first !== null && last !== null ? first - last : null;
+          const positiveSteps = deciles.slice(1).reduce((count, row, index) => count + (row.annualReturnPct >= deciles[index].annualReturnPct ? 1 : 0), 0);
+          return {{ series, first, last, spread, best: values.length ? Math.max(...values) : null, worst: values.length ? Math.min(...values) : null, positiveSteps }};
+        }});
+      const head = `<thead><tr><th>Run</th><th>Family</th><th>D1</th><th>D10</th><th>D1-D10</th><th>Best Decile</th><th>Worst Decile</th><th>Up Steps</th></tr></thead>`;
+      const body = rows.map((row) => `
+        <tr>
+          <td class="name">${{compactLabel(row.series.label)}}</td>
+          <td>${{row.series.family}}</td>
+          <td>${{pct(row.first)}}</td>
+          <td>${{pct(row.last)}}</td>
+          <td>${{pct(row.spread)}}</td>
+          <td>${{pct(row.best)}}</td>
+          <td>${{pct(row.worst)}}</td>
+          <td>${{row.positiveSteps}}/9</td>
+        </tr>
+      `).join("");
+      decileTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
+    }}
+
+    function renderCopyChart() {{
+      const svg = document.getElementById("copyChart");
+      svg.innerHTML = "";
+      const rows = DATA.series.filter((series) => diagnostics(series).copyLike).map((series) => ({{
+        label: compactLabel(series.label),
+        value: diagnostics(series).copyLike.avgAbsCorr,
+        high: diagnostics(series).copyLike.highAbsCorrCount
+      }}));
+      const width = 640;
+      const rowH = 32;
+      const height = Math.max(310, 52 + rows.length * rowH);
+      const margin = {{ top: 18, right: 42, bottom: 28, left: 170 }};
+      const innerW = width - margin.left - margin.right;
+      svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+      rows.forEach((row, index) => {{
+        const y = margin.top + index * rowH + 7;
+        svg.appendChild(svgEl("text", {{ x: margin.left - 8, y: y + 10, "text-anchor": "end", class: "axis" }}, row.label));
+        svg.appendChild(svgEl("rect", {{ x: margin.left, y, width: innerW * Math.min(row.value, 1), height: 14, rx: 2, fill: row.value > 0.9 ? "#b23a48" : "#345995", opacity: "0.82" }}));
+        svg.appendChild(svgEl("text", {{ x: margin.left + innerW * Math.min(row.value, 1) + 6, y: y + 11, class: "axis" }}, `${{row.value.toFixed(2)}} | >.90: ${{row.high}}`));
+      }});
+    }}
+
+    function renderRegimeTable() {{
+      const rows = sortedSeries().flatMap((series) => {{
+        const regimes = diagnostics(series).regimes?.[selectedKey(series)] || [];
+        return regimes.map((row) => ({{ series, ...row }}));
+      }});
+      const regimes = [...new Set(rows.map((row) => row.regime))].sort();
+      const matrixRows = sortedSeries().filter((series) => (diagnostics(series).regimes?.[selectedKey(series)] || []).length);
+      regimeMatrix.style.setProperty("--regime-count", regimes.length);
+      const header = `
+        <div class="regime-row">
+          <div class="regime-cell regime-head">Run</div>
+          ${{regimes.map((regime) => `<div class="regime-cell regime-head">${{regime}}</div>`).join("")}}
+        </div>
+      `;
+      const matrixBody = matrixRows.map((series) => {{
+        const byRegime = Object.fromEntries((diagnostics(series).regimes?.[selectedKey(series)] || []).map((row) => [row.regime, row]));
+        const cells = regimes.map((regime) => {{
+          const row = byRegime[regime];
+          if (!row) return `<div class="regime-cell"></div>`;
+          return `
+            <div class="regime-cell" style="background:${{heatColor(row.annualReturnPct || 0)}}">
+              <strong>${{pct(row.annualReturnPct)}}</strong>
+              Sh ${{num(row.sharpe, 2)}} · n ${{row.n}}
+            </div>
+          `;
+        }}).join("");
+        return `
+          <div class="regime-row">
+            <div class="regime-cell"><strong>${{compactLabel(series.label)}}</strong></div>
+            ${{cells}}
+          </div>
+        `;
+      }}).join("");
+      regimeMatrix.innerHTML = header + matrixBody;
+
+      const head = `<thead><tr><th>Run</th><th>Regime</th><th>Ann Ret</th><th>Sharpe</th><th>Hit</th><th>N</th></tr></thead>`;
+      const body = rows
+        .sort((a, b) => compactLabel(a.series.label).localeCompare(compactLabel(b.series.label)) || a.regime.localeCompare(b.regime))
+        .map((row) => `
+        <tr>
+          <td class="name">${{compactLabel(row.series.label)}}</td>
+          <td>${{row.regime}}</td>
+          <td>${{pct(row.annualReturnPct)}}</td>
+          <td>${{num(row.sharpe, 2)}}</td>
+          <td>${{pct(row.hitRatePct)}}</td>
+          <td>${{row.n}}</td>
+        </tr>
+      `).join("");
+      regimeTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
+    }}
+
+    function renderConcentrationTable() {{
+      const rows = sortedSeries().flatMap((series) => {{
+        const conc = diagnostics(series)?.concentration || {{}};
+        return ["long", "short"].map((side) => {{
+          const names = (conc[side] || []).slice(0, 5);
+          if (!names.length) return null;
+          return {{
+            series,
+            side: side === "long" ? "Long" : "Short",
+            tickers: names.map((row) => `${{row.ticker}} ${{row.count}} (${{row.periodPct.toFixed(0)}}%)`).join(", ")
+          }};
+        }}).filter(Boolean);
+      }});
+      const head = `<thead><tr><th>Run</th><th>Family</th><th>Side</th><th>Top Repeated Tickers</th></tr></thead>`;
+      const body = rows.map((row) => `
+        <tr>
+          <td class="name">${{compactLabel(row.series.label)}}</td>
+          <td>${{row.series.family}}</td>
+          <td>${{row.side}}</td>
+          <td>${{row.tickers}}</td>
+        </tr>
+      `).join("");
+      concentrationTable.innerHTML = `${{head}}<tbody>${{body}}</tbody>`;
+    }}
+
+    function renderWeekTables() {{
+      const periodRows = (which) => sortedSeries().flatMap((series) => {{
+        const key = selectedKey(series);
+        const periods = diagnostics(series)?.topWeeks?.[key] || diagnostics(series)?.topPeriods?.[key] || {{ best: [], worst: [] }};
+        return (periods[which] || []).map((row) => ({{
+          ...row,
+          series,
+          periodBasis: row.basis || (series.kind === "legacy" ? "daily" : "weekly")
+        }}));
+      }}).sort((a, b) => a.returnPct - b.returnPct);
+      const bestRows = periodRows("best").sort((a, b) => b.returnPct - a.returnPct).slice(0, 18);
+      const worstRows = periodRows("worst").slice(0, 18);
+      const table = (title, rows) => {{
+        const head = `<thead><tr><th>${{title}}</th><th>Run</th><th>Basis</th><th>Ret</th><th>L</th><th>S</th><th>IC</th><th>Turn</th><th>Regime</th></tr></thead>`;
+        const body = rows.map((row) => `
+          <tr>
+            <td class="name">${{row.date}}</td>
+            <td>${{compactLabel(row.series.label)}}</td>
+            <td>${{row.periodBasis}}</td>
+            <td>${{pct(row.returnPct)}}</td>
+            <td>${{pct(row.longPct)}}</td>
+            <td>${{pct(row.shortPct)}}</td>
+            <td>${{num(row.ic, 2)}}</td>
+            <td>${{num(row.turnover, 1)}}</td>
+            <td>${{row.regime}}</td>
+          </tr>
+        `).join("");
+        return `${{head}}<tbody>${{body}}</tbody>`;
+      }};
+      bestWeeksTable.innerHTML = table("Best Period", bestRows);
+      worstWeeksTable.innerHTML = table("Worst Period", worstRows);
+    }}
+
     function renderContext() {{
       const success = DATA.success || {{}};
       const v1Books = (DATA.v1Meta?.variants || [])
@@ -1534,6 +2933,7 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
       const rows = [
         ["Prior composite", `rank/confidence variants, ${{DATA.legacyMeta.candidatePerSide}} candidates per side, ${{DATA.legacyMeta.topN}}/${{DATA.legacyMeta.bottomN}} held book`],
         ["V1 system", `one 0-100 LLM score per ticker; pool/book views: ${{v1Books}}`],
+        ["Diagnostic coverage", "Best/worst periods and ticker concentration include legacy plus V1. Rolling IC and decile diagnostics are V1-only because the legacy harness did not save comparable source series."],
         ["Selected view", `${{optionLabel()}}; legacy rows use matching cost only`],
         ["Period column", "Legacy counts daily P&L rows; v1 counts weekly holding windows."],
         ["V1 75/75 win rule", success.is_win ? "Pass" : "No"],
@@ -1549,9 +2949,21 @@ def html_page(payload: dict[str, Any], output: Path) -> str:
       growthSubtitle.textContent = `Legacy = daily composite path at matching cost level; v1 = ${{optionLabel()}}.`;
       renderSummary();
       renderMethodCards();
+      renderBaselineTable();
+      renderRunTrace();
+      renderAnalysisCards();
+      renderFocusNotes();
       renderGrowthChart();
       renderQualityChart();
       renderLegChart();
+      renderDeltaTable();
+      renderCostChart();
+      renderRollingIcChart();
+      renderDecileChart();
+      renderCopyChart();
+      renderRegimeTable();
+      renderConcentrationTable();
+      renderWeekTables();
       renderLeaderboard();
       renderYearly();
       renderContext();
