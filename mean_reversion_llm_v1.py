@@ -42,6 +42,7 @@ DEFAULT_COST_BPS_LEVELS = (0.0, 2.5, 5.0)
 DEFAULT_OUTPUT_DIR = Path("backtest_results/llm_reversal_signal_v1_2009_2014")
 DEFAULT_CACHE_DIR = Path("backtest_results/llm_reversal_signal_v1_cache")
 SCORE_COPY_CORR_THRESHOLD = 0.95
+LLM_SCORE_MAX_ATTEMPTS = 4
 FEATURE_COLUMNS = (
     "Ticker",
     "MRL",
@@ -58,6 +59,10 @@ FEATURE_COLUMNS = (
     "ADX",
     "VolPctl",
 )
+
+
+class EmptyLLMResponseError(ValueError):
+    """Raised when the provider returns a choice without final message content."""
 
 
 V1_SYSTEM_PROMPT = """
@@ -819,8 +824,9 @@ async def call_llm_scores(
     last_error: Exception | None = None
     started = time.time()
 
-    for attempt in range(2):
-        messages = base_messages if attempt == 0 else base_messages + [retry_message]
+    for attempt in range(LLM_SCORE_MAX_ATTEMPTS):
+        use_retry_instruction = last_error is not None and not isinstance(last_error, EmptyLLMResponseError)
+        messages = base_messages + ([retry_message] if use_retry_instruction else [])
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -832,9 +838,17 @@ async def call_llm_scores(
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             response_payload = response.json()
-            content = response_payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+            choices = response_payload.get("choices") or [{}]
+            choice = choices[0] if choices else {}
+            message = choice.get("message") or {}
+            content = message.get("content") or ""
             if not content:
-                raise ValueError("No content in LLM response")
+                raise EmptyLLMResponseError(
+                    "No content in LLM response "
+                    f"(finish_reason={choice.get('finish_reason')!r}, "
+                    f"message_keys={sorted(message.keys())}, "
+                    f"usage={response_payload.get('usage', {})})"
+                )
             raw_output = technical_llm._parse_json_content(content)
             validated = validate_llm_scores(raw_output, pool.long_tickers, pool.short_tickers, prompt_style)
             prompt_chars = sum(len(message["content"]) for message in messages)
@@ -855,10 +869,10 @@ async def call_llm_scores(
             }
         except Exception as exc:  # noqa: BLE001 - callers need one consolidated failure.
             last_error = exc
-            if attempt == 0:
-                await asyncio.sleep(2.0)
+            if attempt < LLM_SCORE_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(2.0 * (attempt + 1))
                 continue
-            raise RuntimeError(f"LLM score call failed after one retry: {exc}") from exc
+            raise RuntimeError(f"LLM score call failed after {LLM_SCORE_MAX_ATTEMPTS} attempts: {exc}") from exc
 
     raise RuntimeError(f"LLM score call failed: {last_error}")
 
