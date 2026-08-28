@@ -1,8 +1,8 @@
 """Export the research dashboard suite as a self-contained static website.
 
 The source dashboards live under the ignored ``backtest_results`` tree. This
-utility copies only the curated HTML pages intended for publication, rewrites
-their cross-page links, and writes the GitHub Pages bundle to ``docs/research``.
+utility copies only the curated HTML pages intended for sharing, rewrites their
+cross-page links, and writes the bundle to ``presentations/research_dashboards``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "docs/research"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "presentations/research_dashboards"
 PUBLISHED_HEADER = """<!--
   Purpose: Publish a self-contained page from the mean-reversion LLM research
   dashboard suite. Regenerate with scripts/export_research_site.py.

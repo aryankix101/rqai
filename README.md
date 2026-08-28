@@ -2,21 +2,19 @@
 
 ## Research Dashboards
 
-[Open the published research dashboard](https://aryankix101.github.io/rqai/)
+[Browse the research dashboard suite](presentations/research_dashboards/)
 
 The dashboard hub provides one-click access to the prompt dashboard,
 autoresearch report, future experiments, out-of-sample testing, latest prompt
-campaign, and A/B/C/D interaction update. The tracked static site lives in
-`docs/research/`; large generated outputs and private caches remain ignored.
+campaign, and A/B/C/D interaction update. Start with
+`presentations/research_dashboards/index.html`; large generated outputs and
+private caches remain ignored.
 
 Refresh the published copies after regenerating local dashboards:
 
 ```bash
 ./.venv/bin/python scripts/export_research_site.py
 ```
-
-GitHub Pages deploys the bundle after it is pushed to `main`. On first use,
-select **GitHub Actions** under **Settings → Pages → Build and deployment**.
 
 ## Current Pipeline
 
