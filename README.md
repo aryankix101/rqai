@@ -1,86 +1,106 @@
-# LLM Mean-Reversion Pipeline
+# Mean-Reversion LLM Research
 
-## What this does
+## Current Pipeline
 
-This program runs an LLM-assisted mean-reversion stock strategy on the Russell universe.
+The active experiment runner is `mean_reversion_llm_v2.py`. The current lab
+configuration is a 60/60 candidate pool, a 30/30 book, fixed five-trading-day
+gross C2C accounting, and paired Trail5 controls.
 
-In plain English:
+Core runtime modules:
 
-1. It finds recent losers and recent winners across the universe.
-2. It shows the LLM a filtered candidate list plus technical context.
-3. The LLM chooses which names to keep.
-4. The system converts those choices into a portfolio and backtests the result.
+- `mean_reversion_llm_v2.py`: prompt variants, LLM caching, replay, and reports.
+- `mean_reversion_llm_v1.py`: point-in-time feature and portfolio utilities used by V2.
+- `mean_reversion_llm_v25_memory.py`: optional V2.5 historical-analogue fields.
+- `run_backtest_v3.py`: holding-window accounting.
+- `technical_llm.py`: provider and JSON-response plumbing.
+- `market_regime.py`: point-in-time SPY/VIX context helpers.
+- `russell_data_loader.py` and `data_source_config.py`: Russell data loading.
 
-For the current run setup:
-- The LLM sees the top `100` long candidates and top `100` short candidates.  (for this example config)
-- It must choose exactly `50` longs and `50` shorts. (for this example config)
-- The executed portfolio is equal-weighted.
-- `--log-llm-trace` stores both the LLM input and raw output for auditability.
+Current research and reporting tools:
 
-## Components actually used
+- `mean_reversion_llm_v2_autoresearch.py`: staged prompt search and campaign management.
+- `mean_reversion_llm_v2_consensus.py`: offline 3-of-4 V2 rank-consensus experiment.
+- `mean_reversion_llm_v2_side_experiments.py`: dedicated-side specs, hybrid evaluation, and side-campaign evaluator.
+- `mean_reversion_llm_v2_phase2_validation.py`: development/OOS comparison tracker.
+- `mean_reversion_research_diagnostics.py`: leakage-safe offline diagnostics and prompt-suite declarations.
+- `run_mean_reversion_prompt_interaction.py` and `finalize_mean_reversion_prompt_interaction.py`: resumable prompt-interaction supervision and packaging.
+- `mean_reversion_llm_v2_sleeve_splice_experiments.py`: frozen sleeve-splice specifications and offline evaluation.
+- `run_mean_reversion_sleeve_splice_suite.py` and `run_mean_reversion_sleeve_splice_oos.py`: guarded in-sample/OOS sleeve supervisors.
+- `mean_reversion_prompt_dashboard.py` and `update_sleeve_splice_phase2_dashboard.py`: static report generation and sleeve-result updates.
+- `presentations/mean_reversion_llm_research_review.html`: self-contained browser presentation of the research.
 
-### 1. Data and config
+## Results Layout
 
-- [data_source_config.py](/Users/aryankumawat/Desktop/RQA/rqai/data_source_config.py)
-  Defines where the Russell data, SPY calendar data, and composite score files live.
+- `backtest_results/llm_reversal_signal_v2_2009_2014/`: development report hub.
+- `backtest_results/llm_reversal_signal_v2_anon_validation_2015_2020/`: validation period.
+- `backtest_results/llm_reversal_signal_v2_anon_final_2020_2025/`: final-period artifacts.
+- `backtest_results/llm_reversal_signal_v2_anon_offset2_exploratory_2020_2025/`: offset-2 exploratory run.
+- `backtest_results/composite_scores_russell/`: active deterministic score input; do not archive.
+- `backtest_results/past/`: retained historical outputs, failed runs, and paid caches no longer on the active path.
 
-- [indicator_feature_schema.py](/Users/aryankumawat/Desktop/RQA/rqai/indicator_feature_schema.py)
-  Standardizes the technical indicator fields that are passed into the LLM prompt.
+Historical prompt variants remain at their original paths because the combined
+dashboard reads them directly. Completed standalone experiments and legacy
+documentation are kept as local historical snapshots and excluded from Git.
 
-- [portfolio_constraints.py](/Users/aryankumawat/Desktop/RQA/rqai/portfolio_constraints.py)
-  Applies basic trading guardrails such as minimum price and symbol-hygiene filters.
+## Repository Hygiene
 
-### 2. LLM portfolio construction
+Git includes runnable source, its tests, documentation, small reference inputs,
+and the research-review presentation. Generated backtests, caches, credentials,
+virtual environments, OS metadata, and local historical snapshots are excluded
+through `.gitignore` so `git add .` does not publish them accidentally.
 
-- [llm_portfolio_constructor.py](/Users/aryankumawat/Desktop/RQA/rqai/llm_portfolio_constructor.py)
-  The main orchestrator.
-  It loads the data, builds each rebalance universe, calls the strategy module, and saves the cached LLM decisions.
+## Other Retained Pipelines
 
-- [mean_reversion_llm.py](/Users/aryankumawat/Desktop/RQA/rqai/mean_reversion_llm.py)
-  The strategy-specific logic for this run.
-  It ranks stocks by `mean_reversion_signal = -(5-day trailing return)`, builds the prompt, and asks the LLM to choose the final `50` longs and `50` shorts.
+The deterministic and original portfolio-constructor modules remain available
+because they are coherent runnable pipelines with their own tests. They are not
+part of the active V2 execution path.
 
-- [technical_llm.py](/Users/aryankumawat/Desktop/RQA/rqai/technical_llm.py)
-  Shared LLM plumbing.
-  It handles validation, exact position-count enforcement, weighting logic, and optional trace capture.
+## Consensus And Dedicated-Side Experiments
 
-### 3. Converting LLM output into backtest inputs
+The consensus experiment is entirely offline. It validates the four frozen
+current-epoch V2 caches, excludes the two no-regime paired controls, and writes
+all 3-of-4 triplets plus the one-through-four-run ensemble-size curve:
 
-- [llm_composite_writer.py](/Users/aryankumawat/Desktop/RQA/rqai/llm_composite_writer.py)
-  Converts the cached LLM portfolio file into score CSVs that the backtest engine can read.
+```bash
+./.venv/bin/python mean_reversion_llm_v2_consensus.py
+```
 
-### 4. Backtesting and execution rules
+The fixed dedicated-side test deliberately reuses the completed joint
+minimal-change book. First create the two immutable prompt specs, then score
+each side once with `mean_reversion_llm_v2.py --phase llm-cache` using the same
+2009–2014 anchor-3 manifest and a shared cache directory. The cache identity
+includes both `side_scope` and `replicate_id`.
 
-- [factor_backtest_engine.py](/Users/aryankumawat/Desktop/RQA/rqai/factor_backtest_engine.py)
-  Simulates the portfolio through time and produces performance outputs such as PnL, holdings logs, and review logs.
+```bash
+./.venv/bin/python mean_reversion_llm_v2_side_experiments.py init-specs
+./.venv/bin/python mean_reversion_llm_v2.py --phase llm-cache --start 2009-01-01 --end 2014-01-01 --schedule anchors --anchor-offsets 3 --pool-sizes 60 --book-sizes 30 --llm-pool-size 60 --model deepseek-v4-flash --temperature 1 --thinking-mode disabled --anonymize-tickers --cost-bps-levels 0 --experimental-override --experimental-prompt-spec backtest_results/v2_dedicated_side_prompts_2009_2014/prompt_specs/dedicated_long_r1.json --output-dir backtest_results/v2_dedicated_side_prompts_2009_2014/long --cache-dir backtest_results/v2_dedicated_side_prompts_2009_2014/cache
+./.venv/bin/python mean_reversion_llm_v2.py --phase llm-cache --start 2009-01-01 --end 2014-01-01 --schedule anchors --anchor-offsets 3 --pool-sizes 60 --book-sizes 30 --llm-pool-size 60 --model deepseek-v4-flash --temperature 1 --thinking-mode disabled --anonymize-tickers --cost-bps-levels 0 --experimental-override --experimental-prompt-spec backtest_results/v2_dedicated_side_prompts_2009_2014/prompt_specs/dedicated_short_r1.json --output-dir backtest_results/v2_dedicated_side_prompts_2009_2014/short --cache-dir backtest_results/v2_dedicated_side_prompts_2009_2014/cache
+./.venv/bin/python mean_reversion_llm_v2_side_experiments.py evaluate
+```
 
-- [portfolio_policies.py](/Users/aryankumawat/Desktop/RQA/rqai/portfolio_policies.py)
-  Provides shared portfolio construction rules used by the backtest engine, such as weighting and book-sizing behavior.
+Only sides listed in `fixed_prompt_result.json` under `autoresearch_sides` should
+be searched. Initialize one campaign per qualifying side with its dedicated
+parent cache:
 
-## What the LLM actually sees
+```bash
+./.venv/bin/python mean_reversion_llm_v2_autoresearch.py campaign init long-side-v1 --side-scope long --side-parent-cache /absolute/path/to/dedicated-long-r1-cache.json
+./.venv/bin/python mean_reversion_llm_v2_autoresearch.py campaign start long-side-v1
+```
 
-On each rebalance date, the LLM receives:
+Smoke, mini, and medium candidates use one scorer run. The sole full-stage
+finalist uses three independent replicas and mean-rank consensus. Manual
+`approve-validation` freezes the winner, all three validation replicas, the
+dedicated parent, lineage, manifests, and code/harness fingerprints before any
+2015–2019 call. Use the batch command for the actual manual reveal approval;
+pass one campaign if only one side won, or both campaigns if both won:
 
-- the top recent losers for possible longs
-- the top recent winners for possible shorts
-- the 5-day trailing return and derived mean-reversion signal
-- a compact set of technical indicators for context
-- strict instructions to return exactly `50` longs and `50` shorts
+```bash
+./.venv/bin/python mean_reversion_llm_v2_side_experiments.py freeze-validation backtest_results/autoresearch_campaigns/long-side-v1 --output backtest_results/autoresearch_campaigns/side-validation-batch.json
+./.venv/bin/python mean_reversion_llm_v2_autoresearch.py campaign start long-side-v1
+./.venv/bin/python mean_reversion_llm_v2_side_experiments.py combine-campaigns backtest_results/autoresearch_campaigns/long-side-v1 --validation
+```
 
-Most indicator values are percentile-normalized to make them easier to compare across stocks.
-
-## Main outputs
-
-- `backtest_results/llm_portfolio_cache/...json`
-  Cached LLM decisions and, when enabled, full prompt/response traces.
-
-- `backtest_results/composite_scores_.../`
-  LLM output rewritten into backtest-ready score files.
-
-- `backtest_results/factor_backtest/.../`
-  Final performance files, including returns, holdings, and logs.
-
-## Not part of the current run
-
-- `llm_loss_memory.py` is only used if `--enable-loss-memory` is turned on.
-- The deterministic LLM strategy path is available, but not used when `--strategy-style mean_reversion` is selected.
+The one-side combined result retains the existing minimal scorer on the other
+side. With two winning campaigns, `combine-campaigns` takes the long
+contribution from the frozen long winner and the short contribution from the
+frozen short winner. The 2020-and-later firewall remains unchanged.

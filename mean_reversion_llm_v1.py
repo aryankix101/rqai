@@ -24,7 +24,7 @@ from scipy import stats
 
 import run_backtest_v3 as rb
 import technical_llm
-from llm_portfolio_constructor import SPY_DATA_PATH, identify_regime
+from market_regime import SPY_DATA_PATH, identify_regime
 from russell_data_loader import load_russell_ohlcv_histories
 
 PROMPT_STYLE_V1_SCORE = "v1_score"
@@ -79,10 +79,10 @@ TASK
 You are scoring two pools of stocks selected as mean-reversion candidates
 over the next 5 trading days.
 
-  LONG POOL  = the 150 biggest 5-day losers in the Russell 1000.
+  LONG POOL  = the 60 biggest 5-day losers in the Russell 1000.
                Looking for snap-back / oversold-bounce setups.
 
-  SHORT POOL = the 150 biggest 5-day winners in the Russell 1000.
+  SHORT POOL = the 60 biggest 5-day winners in the Russell 1000.
                Looking for fade / overbought-reversal setups.
 
 For each ticker in each pool, output a single SCORE (0-100):
@@ -121,10 +121,10 @@ MEAN-REVERSION RAW CONFIDENCE SCORING
 
 CONTEXT
 Mean reversion is the tendency of stocks that have moved sharply in one
-direction to partially reverse over the next 5 trading days. This experiment
-uses the same candidate construction and benchmark accounting as v1, but asks
-for the raw confidence signal that worked best in the earlier rank/confidence
-study.
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
 
 TASK
 You are scoring two pools of stocks selected as mean-reversion candidates over
@@ -168,10 +168,10 @@ MEAN-REVERSION RANK + CONFIDENCE SCORING
 
 CONTEXT
 Mean reversion is the tendency of stocks that have moved sharply in one
-direction to partially reverse over the next 5 trading days. This experiment
-keeps the v1 candidate construction and benchmark accounting, but restores the
-older rank/list-generation structure: first order every candidate within its
-own side, then attach a confidence score.
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
 
 TASK
 You are ranking two pools of stocks selected as mean-reversion candidates over
@@ -227,6 +227,7 @@ class CandidatePool:
     feature_rows: dict[str, dict[str, float | str]]
     universe_hash: str
     regime: str
+    market_context: dict[str, Any] | None = None
 
     @property
     def pool_tickers(self) -> list[str]:
@@ -804,6 +805,7 @@ async def call_llm_scores(
     model: str,
     temperature: float,
     prompt_style: str = DEFAULT_PROMPT_STYLE,
+    print_reasoning_content: bool = False,
 ) -> dict[str, Any]:
     user_prompt = format_user_prompt(pool)
     base_messages = [
@@ -832,6 +834,7 @@ async def call_llm_scores(
             "messages": messages,
             "stream": False,
         }
+        technical_llm.apply_deepseek_request_mode(payload, model)
         if technical_llm.model_supports_temperature(model):
             payload["temperature"] = temperature
         try:
@@ -842,6 +845,11 @@ async def call_llm_scores(
             choice = choices[0] if choices else {}
             message = choice.get("message") or {}
             content = message.get("content") or ""
+            reasoning_content = message.get("reasoning_content") or ""
+            if print_reasoning_content:
+                print(f"\n--- BEGIN reasoning_content {pool.signal_date.date()} ---")
+                print(reasoning_content or "[empty reasoning_content]")
+                print(f"--- END reasoning_content {pool.signal_date.date()} ---\n")
             if not content:
                 raise EmptyLLMResponseError(
                     "No content in LLM response "
@@ -858,6 +866,7 @@ async def call_llm_scores(
                 "parse_status": "ok",
                 "retry_count": attempt,
                 "latency_seconds": time.time() - started,
+                "reasoning_content": reasoning_content,
                 "llm_usage": {
                     "provider_usage": response_payload.get("usage", {}),
                     "prompt_chars": prompt_chars,

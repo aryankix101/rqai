@@ -1,3 +1,9 @@
+"""Provide shared LLM API, response parsing, and portfolio validation helpers.
+
+Strategy modules use this layer to load local credentials, call the configured
+provider, enforce structured outputs, and normalize final portfolio weights.
+"""
+
 import os
 import json
 import re
@@ -21,8 +27,11 @@ _SECRETS = _load_secrets()
 # DeepSeek API Configuration
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_API_KEY = _SECRETS.get("DEEPSEEK_API_KEY", "")
-DEFAULT_MODEL = "deepseek-reasoner"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_TEMPERATURE = 0.6
+DEFAULT_THINKING_MODE = "disabled"
+DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+DEEPSEEK_LEGACY_THINKING_MODELS = {"deepseek-reasoner"}
 REQUEST_TIMEOUT = 300.0
 PORTFOLIO_REQUEST_TIMEOUT = 300.0  
 MAX_PORTFOLIO_RETRIES = 5
@@ -44,9 +53,38 @@ def get_deepseek_api_key() -> str:
     return DEEPSEEK_API_KEY
 
 
-def model_supports_temperature(model: str) -> bool:
-    """DeepSeek reasoner ignores temperature; omit it to match the API contract."""
-    return str(model or "").strip() != "deepseek-reasoner"
+def is_deepseek_thinking_enabled(model: str, thinking_mode: str = DEFAULT_THINKING_MODE) -> bool:
+    normalized_model = str(model or "").strip()
+    return effective_thinking_mode(model, thinking_mode=thinking_mode) == "enabled"
+
+
+def effective_thinking_mode(model: str, thinking_mode: str = DEFAULT_THINKING_MODE) -> str:
+    normalized_model = str(model or "").strip()
+    normalized_mode = str(thinking_mode or DEFAULT_THINKING_MODE).strip().lower()
+    if normalized_model in DEEPSEEK_LEGACY_THINKING_MODELS:
+        return "enabled"
+    if normalized_mode not in {"enabled", "disabled"}:
+        raise ValueError("--thinking-mode must be either enabled or disabled")
+    return normalized_mode
+
+
+def model_supports_temperature(model: str, thinking_mode: str = DEFAULT_THINKING_MODE) -> bool:
+    """Thinking mode ignores temperature; omit it to match the API contract."""
+    return not is_deepseek_thinking_enabled(model, thinking_mode=thinking_mode)
+
+
+def apply_deepseek_request_mode(
+    payload: dict[str, Any],
+    model: str,
+    thinking_mode: str = DEFAULT_THINKING_MODE,
+) -> None:
+    """Make V4 thinking/non-thinking mode explicit so legacy alias behavior is reproducible."""
+    normalized_model = str(model or "").strip()
+    normalized_mode = effective_thinking_mode(model, thinking_mode=thinking_mode)
+    if normalized_model in DEEPSEEK_V4_MODELS:
+        payload["thinking"] = {"type": normalized_mode}
+        if normalized_mode == "enabled":
+            payload.setdefault("reasoning_effort", "high")
 
 
 # =============================================================================
@@ -498,6 +536,7 @@ async def _call_llm_json_with_validation(
         "messages": list(base_messages),
         "stream": False,
     }
+    apply_deepseek_request_mode(payload, model)
     if model_supports_temperature(model):
         payload["temperature"] = temperature
 
@@ -1441,7 +1480,12 @@ async def main():
     parser.add_argument("--input", required=True, help="Path to technical JSON file (e.g., out/UNH_latest.json)")
     parser.add_argument("--output", help="Optional output file for verdict (default: print to stdout)")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="DeepSeek model name")
-    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Sampling temperature (ignored by deepseek-reasoner)")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+        help="Sampling temperature (ignored when thinking mode is enabled)",
+    )
     
     args = parser.parse_args()
     

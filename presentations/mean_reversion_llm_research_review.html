@@ -1,0 +1,636 @@
+<!--
+  Purpose: Present the mean-reversion LLM research design, evidence, and
+  conclusions as a self-contained browser-based review deck.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mean-Reversion LLM Research Review</title>
+  <style>
+    :root {
+      --ink: #10233c;
+      --muted: #5c6b7e;
+      --paper: #f6f3ec;
+      --panel: #ffffff;
+      --navy: #102f52;
+      --blue: #2878b8;
+      --cyan: #53a9c7;
+      --green: #25896c;
+      --amber: #d99028;
+      --red: #bc4c50;
+      --line: #d6dde5;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #091729; color: var(--ink); }
+    body { min-height: 100vh; display: grid; place-items: center; overflow: hidden; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .deck { position: relative; display: block; width: 1440px; height: 810px; padding: 0; }
+    .slide {
+      display: none;
+      position: absolute;
+      inset: 0;
+      width: 1440px;
+      height: 810px;
+      transform: scale(var(--deck-scale, 1));
+      transform-origin: top left;
+      overflow: hidden;
+      background: var(--paper);
+      border-radius: 10px;
+      box-shadow: 0 28px 80px rgba(0,0,0,.35);
+      padding: 54px 66px 44px;
+    }
+    .slide.active { display: block; }
+    .slide::before {
+      content: "";
+      position: absolute; inset: 0 0 auto 0; height: 8px;
+      background: linear-gradient(90deg, var(--navy), var(--blue), var(--cyan));
+    }
+    .title-slide { color: white; background: linear-gradient(130deg, #0b1e35 0%, #123b61 62%, #236f8d 100%); }
+    .title-slide::before { height: 100%; opacity: .18; background: radial-gradient(circle at 82% 18%, #86e3e0, transparent 26%); }
+    .title-slide .kicker, .title-slide .subtitle, .title-slide .source { color: #dbeaf4; }
+    .kicker { color: var(--blue); text-transform: uppercase; letter-spacing: .16em; font-size: 15px; font-weight: 750; }
+    h1 { margin: 18px 0 18px; max-width: 1040px; font-size: 58px; line-height: 1.03; letter-spacing: -.035em; }
+    h2 { margin: 4px 0 23px; font-size: 38px; line-height: 1.08; letter-spacing: -.025em; }
+    h3 { margin: 0 0 9px; font-size: 20px; }
+    p { margin: 0 0 12px; font-size: 18px; line-height: 1.42; }
+    .subtitle { max-width: 850px; color: var(--muted); font-size: 23px; line-height: 1.42; }
+    .hero-rule { width: 118px; height: 5px; margin: 30px 0 28px; border-radius: 5px; background: #65c6ca; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; box-shadow: 0 5px 14px rgba(16,35,60,.05); }
+    .card.good { border-top: 5px solid var(--green); }
+    .card.warn { border-top: 5px solid var(--amber); }
+    .card.bad { border-top: 5px solid var(--red); }
+    .card.info { border-top: 5px solid var(--blue); }
+    .metric { color: var(--navy); font-size: 36px; font-weight: 790; letter-spacing: -.03em; }
+    .metric-label { color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
+    ul { margin: 8px 0 0 18px; padding: 0; }
+    li { margin: 7px 0; font-size: 17px; line-height: 1.36; }
+    .tight li { margin: 4px 0; font-size: 16px; }
+    .takeaway { margin-top: 18px; padding: 15px 18px; background: #e6f2f2; border-left: 5px solid var(--green); border-radius: 5px; font-size: 18px; line-height: 1.38; }
+    .warning { background: #fff2df; border-left-color: var(--amber); }
+    .danger { background: #fae9e8; border-left-color: var(--red); }
+    .flow { display: grid; grid-template-columns: repeat(6, 1fr); align-items: stretch; gap: 12px; margin-top: 28px; }
+    .flow .node { position: relative; padding: 17px 12px; text-align: center; background: white; border: 1px solid var(--line); border-radius: 10px; font-size: 15px; font-weight: 700; }
+    .flow .node:not(:last-child)::after { content: "→"; position: absolute; right: -18px; top: 34%; color: var(--blue); font-size: 22px; z-index: 2; }
+    table { width: 100%; border-collapse: collapse; background: white; border-radius: 9px; overflow: hidden; font-size: 14px; }
+    th { padding: 10px 11px; text-align: left; color: white; background: var(--navy); font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+    td { padding: 9px 11px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+    tr.highlight td { background: #e8f4ef; font-weight: 720; }
+    tr.fail td { background: #faecea; }
+    .pill { display: inline-block; padding: 4px 8px; border-radius: 20px; background: #dfeaf5; color: var(--navy); font-size: 12px; font-weight: 750; }
+    .pill.good { background: #dcefe7; color: #176b52; }
+    .pill.bad { background: #f6dedd; color: #9b333a; }
+    .pill.warn { background: #fbe8c9; color: #8e5c12; }
+    .bar-chart { display: grid; gap: 14px; margin-top: 20px; }
+    .bar-row { display: grid; grid-template-columns: 205px 1fr 72px; gap: 12px; align-items: center; font-size: 15px; }
+    .track { height: 24px; background: #e2e6eb; border-radius: 4px; overflow: hidden; }
+    .bar { height: 100%; background: linear-gradient(90deg, var(--blue), var(--cyan)); border-radius: 4px; }
+    .bar.control { background: #8b98a6; }
+    .bar.bad { background: var(--red); }
+    .timeline { display: grid; grid-template-columns: repeat(8, 1fr); gap: 9px; margin-top: 24px; }
+    .stage { min-height: 270px; padding: 14px 12px; border-top: 5px solid var(--blue); background: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(16,35,60,.06); }
+    .stage.fail { border-top-color: var(--red); }
+    .stage.mixed { border-top-color: var(--amber); }
+    .stage.win { border-top-color: var(--green); }
+    .stage .version { font-size: 20px; font-weight: 800; }
+    .stage .desc { margin-top: 8px; color: var(--muted); font-size: 12.5px; line-height: 1.34; }
+    .stage .result { margin-top: 12px; font-size: 15px; font-weight: 750; }
+    .quote { padding: 17px 20px; background: #102f52; color: #eff6fa; border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; line-height: 1.4; }
+    .versus { display: grid; grid-template-columns: 1fr 54px 1fr; gap: 14px; align-items: stretch; }
+    .versus .vs { align-self: center; justify-self: center; font-weight: 850; color: var(--muted); }
+    .matrix { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .matrix .cell { padding: 15px 17px; border-radius: 9px; background: white; border: 1px solid var(--line); }
+    .matrix .cell h3 { font-size: 17px; }
+    .source { position: absolute; left: 66px; right: 90px; bottom: 17px; color: #6f7d8d; font-size: 11px; line-height: 1.25; }
+    .slide-number { position: absolute; right: 30px; bottom: 16px; color: #7d8997; font-size: 12px; font-weight: 700; }
+    .controls { position: fixed; right: 8px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 10; opacity: .72; }
+    .controls:hover { opacity: 1; }
+    button { border: 0; border-radius: 30px; padding: 10px 15px; color: white; background: rgba(25,54,82,.9); cursor: pointer; font-weight: 700; }
+    button:hover { background: var(--blue); }
+    .notes { display: none; }
+    .small { font-size: 14px; color: var(--muted); }
+    .accent { color: var(--green); }
+    .red { color: var(--red); }
+    .nowrap { white-space: nowrap; }
+    @media (max-width: 900px) {
+      body { display: block; overflow: auto; }
+      .deck { width: 100% !important; height: auto !important; }
+      .slide { position: relative; inset: auto; width: 100vw; height: auto; min-height: 100vh; transform: none !important; border-radius: 0; padding: 40px 28px 70px; overflow: auto; }
+      .grid-2, .grid-3, .grid-4, .flow, .timeline, .matrix, .versus { grid-template-columns: 1fr; }
+      .versus .vs { display: none; }
+      h1 { font-size: 42px; } h2 { font-size: 30px; }
+      .source { position: static; margin-top: 20px; }
+      .controls { right: 8px; top: auto; bottom: 8px; transform: none; flex-direction: row; }
+    }
+    @media print {
+      @page { size: 13.333in 7.5in; margin: 0; }
+      html, body { display: block; overflow: visible; background: white; }
+      .deck { display: block; width: 13.333in !important; height: auto !important; padding: 0; }
+      .slide, .slide.active { position: relative; inset: auto; display: block; width: 13.333in; height: 7.5in; transform: none !important; border-radius: 0; box-shadow: none; break-after: page; page-break-after: always; }
+      .controls { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main class="deck">
+
+  <section class="slide title-slide active">
+    <div class="kicker">Research review · July 2026</div>
+    <h1>From reversal heuristic to a controlled LLM selector</h1>
+    <div class="hero-rule"></div>
+    <p class="subtitle">How the strategy evolved, what the prompt research actually established, which apparent wins failed scrutiny, and what should move forward.</p>
+    <p style="margin-top:44px;font-size:18px;color:#bcd7e6;">Scope: 2009–2014 development and 2015–2019 validation only</p>
+    <div class="source">Research lineage: Prompt Engineering Dashboard · Autoresearch Cache Sweep · Phase 2 Validation Tracker</div>
+    <div class="slide-number">1</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Executive summary</div>
+    <h2>The research produced a usable strategy—and a useful list of things not to do</h2>
+    <div class="grid-4">
+      <div class="card good"><div class="metric">Real</div><div class="metric-label">Selection value</div><p>The LLM adds ranking information inside a deterministic mean-reversion candidate pool.</p></div>
+      <div class="card info"><div class="metric">Simple</div><div class="metric-label">Prompt lesson</div><p>A one-line calibration correction beat a comprehensive rewrite in development.</p></div>
+      <div class="card warn"><div class="metric">Fragile</div><div class="metric-label">Complexity</div><p>Memory, regime mapping, aggressive concentration, and score sizing did not earn production status.</p></div>
+      <div class="card good"><div class="metric">Advance</div><div class="metric-label">Decision</div><p>The one-line challenger is the best development configuration and preferred successor to frozen V2.</p></div>
+    </div>
+    <div class="takeaway"><strong>Takeaway:</strong> the work narrowed the system. The one-line challenger improved the complete V2 configuration without adding complexity; temperature 1.0 is the preferred setting for its validation run.</div>
+    <div class="source">Sources: prompt_engineering_dashboard.html; autoresearch_report.html; phase2_scorecard.csv</div>
+    <div class="slide-number">2</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Research architecture</div>
+    <h2>We converted an open-ended idea into a fixed, auditable pipeline</h2>
+    <div class="flow">
+      <div class="node">Russell 1000<br><span class="small">point-in-time data</span></div>
+      <div class="node">Trail5 screen<br><span class="small">60 losers + 60 winners</span></div>
+      <div class="node">V2 scorer<br><span class="small">anonymized SEC IDs</span></div>
+      <div class="node">Select 30/side<br><span class="small">side-relative rank</span></div>
+      <div class="node">Equal weight<br><span class="small">50% long / 50% short</span></div>
+      <div class="node">Hold 5 days<br><span class="small">gross C2C audit</span></div>
+    </div>
+    <div class="grid-3" style="margin-top:28px;">
+      <div class="card"><div class="metric-label">Development</div><div class="metric">2009–14</div><p>Prompt discdoublovery, construction tests, bootstraps, and placebos.</p></div>
+      <div class="card"><div class="metric-label">Validation</div><div class="metric">2015–19</div><p>Locked comparison of the primary book and glossary ablation.</p></div>
+      <div class="card warn"><div class="metric-label">Protected holdout</div><div class="metric">2020-24</div><p>Later-period results are intentionally absent from this presentation.</p></div>
+    </div>
+    <div class="takeaway"><strong>Accounting convention:</strong> all headline CAGRs here use 50/50 capital normalization. Raw 100/100 spread returns are audit-only.</div>
+    <div class="source">Sources: mean_reversion_llm_v2.py run configuration; prompt_engineering_dashboard.html (“Important accounting note”)</div>
+    <div class="slide-number">3</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Where the work started</div>
+    <h2>The first gains came from fixing the experiment—not from adding prompt complexity</h2>
+    <div class="grid-2">
+      <div>
+        <div class="bar-chart">
+          <div class="bar-row"><span>Legacy deterministic</span><div class="track"><div class="bar control" style="width:59%"></div></div><strong>9.5%</strong></div>
+          <div class="bar-row"><span>V1 LLM (150→30)</span><div class="track"><div class="bar" style="width:59%"></div></div><strong>9.5%</strong></div>
+          <div class="bar-row"><span>Trail5 paired control</span><div class="track"><div class="bar control" style="width:81%"></div></div><strong>13.2%</strong></div>
+          <div class="bar-row"><span>V2 ticker-visible</span><div class="track"><div class="bar" style="width:100%"></div></div><strong>16.2%</strong></div>
+        </div>
+        <p class="small" style="margin-top:16px;">Development CAGR, 50/50 normalized. Historical progression is not a clean causal A/B because schedule and pool construction also changed.</p>
+      </div>
+      <div class="card info">
+        <h3>What V2 disciplined</h3>
+        <ul>
+          <li>Candidate generation stayed deterministic.</li>
+          <li>The model scored every name rather than directly choosing a portfolio.</li>
+          <li>Selection occurred independently within long and short pools.</li>
+          <li>Offset 3 and a 60→30 construction became the common lab bench.</li>
+          <li>Strict JSON made invalid behavior observable and rejectable.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="takeaway"><strong>Interpretation:</strong> V2 was an experimental-design upgrade as much as a prompt upgrade. Comparisons became much more credible after the harness was frozen.</div>
+    <div class="source">Sources: prompt_engineering_dashboard.html, Main Results; comparison_scorecard.csv under llm_reversal_signal_v2_2009_2014</div>
+    <div class="slide-number">4</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Prompt evolution</div>
+    <h2>What changed in each version—and what it tested</h2>
+    <div class="timeline">
+      <div class="stage win"><div class="version">V2</div><div class="desc"><strong>Baseline:</strong> explain every feature, score all names 0–100 within each side, and return strict JSON. Tests whether the LLM can rerank a fixed Trail5 candidate pool.</div><div class="result">Frozen incumbent</div></div>
+      <div class="stage fail"><div class="version">V2.1</div><div class="desc"><strong>Prompt change:</strong> require evidence beyond the mechanically linked Trail5 feature family. Tests whether forcing “incremental” reasoning creates a better residual signal.</div><div class="result">7.2% CAGR · failed</div></div>
+      <div class="stage fail"><div class="version">V2.2</div><div class="desc"><strong>Schema change:</strong> show real tickers and ask for a −3 to +3 adjustment to a supplied Trail5 base score; Python varies adjustment strength λ.</div><div class="result">12.6% · below Trail5</div></div>
+      <div class="stage mixed"><div class="version">V2.3</div><div class="desc"><strong>Output change:</strong> replace numeric scores with complete ordered long and short lists. Tests whether rank order matters while score magnitude does not.</div><div class="result">13.7% · useful</div></div>
+      <div class="stage mixed"><div class="version">V2.4</div><div class="desc"><strong>Input change:</strong> keep the frozen no-glossary prompt, but replace the named regime with raw SPY/200-day-MA and VIX measurements.</div><div class="result">13.0% · near flat</div></div>
+      <div class="stage fail"><div class="version">V2.5</div><div class="desc"><strong>Feature change:</strong> add past-only analog count, win rate, and mean return (HistN/HistWin/HistRet) to glossary V2. Tests explicit outcome memory.</div><div class="result">10.5% · harmed</div></div>
+      <div class="stage fail"><div class="version">V2.6</div><div class="desc"><strong>Full rewrite:</strong> clarify data scope, missing values, linked features, contextual judgment, score meaning, and rules while keeping strict JSON.</div><div class="result">12.3% · failed</div></div>
+      <div class="stage win"><div class="version">Minimal</div><div class="desc"><strong>One-line change:</strong> replace “use the full range” with “use 0–100 only when the cross-section supports it.” Everything else stays operationally fixed.</div><div class="result">16.77% · best challenger</div></div>
+    </div>
+    <div class="takeaway"><strong>Pattern:</strong> prompts weakened when they forced the model to be clever, residual, or mechanically contextual. The best challenger removed one overconfident instruction.</div>
+    <div class="source">Sources: mean_reversion_llm_v2.py prompt constants; prompt_engineering_dashboard.html prompt cards and result tables</div>
+    <div class="slide-number">5</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Controlled development evidence</div>
+    <h2>The clean prompt tests favored the original scoring task over added structure</h2>
+    <table>
+      <thead><tr><th>Treatment</th><th>What changed</th><th>CAGR</th><th>Sharpe</th><th>Max DD</th><th>Read</th></tr></thead>
+      <tbody>
+        <tr><td>Trail5</td><td>No LLM</td><td>13.15%</td><td>1.132</td><td>−9.03%</td><td><span class="pill">Control</span></td></tr>
+        <tr><td>V2 visible</td><td>Real tickers visible</td><td>16.22%</td><td>1.327</td><td>−7.73%</td><td><span class="pill good">Historical winner</span></td></tr>
+        <tr class="highlight"><td>V2 anonymized</td><td>Same prompt; SEC identifiers</td><td>14.33%</td><td>1.179</td><td>−7.47%</td><td><span class="pill good">Clean control</span></td></tr>
+        <tr><td>V2 + labels</td><td>Structured setup labels/features</td><td>13.1%</td><td>1.138</td><td>−7.9%</td><td>Weaker</td></tr>
+        <tr class="fail"><td>V2.1</td><td>Discriminative/residual instruction</td><td>7.2%</td><td>0.736</td><td>−10.5%</td><td><span class="pill bad">Failed</span></td></tr>
+        <tr class="fail"><td>V2.2 best λ</td><td>Trail5 + contextual adjustment</td><td>12.6%</td><td>1.098</td><td>−7.6%</td><td>Below Trail5</td></tr>
+        <tr><td>V2.3 rank-only</td><td>Ordered arrays; no scores</td><td>13.72%</td><td>1.189</td><td>−7.48%</td><td>Useful, below V2</td></tr>
+      </tbody>
+    </table>
+    <div class="takeaway"><strong>Anonymization trade-off:</strong> visible V2 had higher portfolio CAGR, but anonymized V2 had higher IC and removes ticker-familiarity leakage. It became the defensible research control.</div>
+    <div class="source">Source: prompt_engineering_dashboard.html, “Run Taxonomy” and “Prompt Experiment Performance”</div>
+    <div class="slide-number">6</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Prompt-engineering lesson</div>
+    <h2>One sentence changed score behavior more effectively than a polished rewrite</h2>
+    <div class="versus">
+      <div class="card bad">
+        <h3>Original calibration pressure</h3>
+        <div class="quote">“Use the full 0–100 range. Do not bunch scores around 50.”</div>
+        <p style="margin-top:15px;">This can manufacture confidence even when the cross-section does not support it.</p>
+      </div>
+      <div class="vs">→</div>
+      <div class="card good">
+        <h3>Minimal-change control</h3>
+        <div class="quote">“Use the 0–100 range only when the supplied cross-section supports it. Do not manufacture separation.”</div>
+        <p style="margin-top:15px;">Everything operational stayed fixed: every ticker, original side, strict JSON, no weights or commentary.</p>
+      </div>
+    </div>
+    <div class="grid-3" style="margin-top:20px;">
+      <div class="card"><div class="metric">16.55%</div><div class="metric-label">Minimal · temp 0.6</div><p>Sharpe 1.410; IC 0.0373</p></div>
+      <div class="card"><div class="metric">16.77%</div><div class="metric-label">Minimal · temp 1.0</div><p>Sharpe 1.400; IC 0.0318</p></div>
+      <div class="card bad"><div class="metric red">12.27%</div><div class="metric-label">V2.6 · temp 0.6</div><p>Same model; broad rewrite failed</p></div>
+    </div>
+    <div class="takeaway"><strong>Decision:</strong> the one-line challenger is better than frozen V2 as a complete development configuration: +3.20pp CAGR at temperature 1.0, with higher Sharpe and a slightly better drawdown. Minimal versus V2.6 is a same-model prompt comparison; versus frozen V2, the model also changed, so the performance conclusion is stronger than the prompt-only causal claim.</div>
+    <div class="source">Sources: mean_reversion_llm_v2.py (V2_MINIMAL_CHANGE_CONTROL_PROMPT, V26_SYSTEM_PROMPT); v2_prompt_ab_2009_2014 scorecards</div>
+    <div class="slide-number">7</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Temperature</div>
+    <h2>Temperature 1.0 is preferred, although its edge over 0.6 is modest</h2>
+    <div class="grid-2">
+      <div class="card info">
+        <h3>Frozen V2 temperature grid</h3>
+        <table><thead><tr><th>Temp</th><th>CAGR</th><th>Sharpe</th><th>Max DD</th></tr></thead><tbody>
+          <tr><td>0.0</td><td>13.5%</td><td>1.159</td><td>−7.9%</td></tr>
+          <tr><td>0.6</td><td>13.6%</td><td>1.153</td><td>−7.9%</td></tr>
+          <tr><td>1.0</td><td>14.3%</td><td>1.182</td><td>−12.6%</td></tr>
+          <tr><td>1.5</td><td>13.9%</td><td>1.246</td><td>−7.3%</td></tr>
+        </tbody></table>
+      </div>
+      <div class="card good">
+        <h3>Minimal-change direct comparison</h3>
+        <table><thead><tr><th>Temp</th><th>CAGR</th><th>Sharpe</th><th>IC</th></tr></thead><tbody>
+          <tr><td>0.6</td><td>16.55%</td><td><strong>1.410</strong></td><td><strong>0.0373</strong></td></tr>
+          <tr><td>1.0</td><td><strong>16.77%</strong></td><td>1.400</td><td>0.0318</td></tr>
+          <tr class="fail"><td>1.5</td><td>12.23%</td><td>1.091</td><td>0.0308</td></tr>
+        </tbody></table>
+        <p style="margin-top:14px;"><strong>Preferred: 1.0.</strong> It delivered the highest CAGR and better drawdown. The +0.22pp CAGR edge over 0.6 is modest, but 1.5 clearly degraded performance.</p>
+      </div>
+    </div>
+    <div class="takeaway danger"><strong>Operational boundary:</strong> prefer 1.0, not 1.5. At 1.5 the minimal prompt returned `SEC_0061 = 800` on 2011-06-29 and exhausted four retries. Validation rejected it before portfolio construction, the run resumed cleanly, and the completed result still trailed Trail5 by 0.93pp CAGR.</div>
+    <div class="source">Sources: temperature experiment scorecards; minimal_change_temp1 comparison_scorecard.csv; minimal_change_temp1p5_incidents.json</div>
+    <div class="slide-number">8</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Autoresearch: what the model learned</div>
+    <h2>Ticker visibility helped classify the top 30; anonymity produced the better internal ranking</h2>
+    <div class="grid-3">
+      <div class="card good"><div class="metric">16.22%</div><div class="metric-label">Visible V2 · equal top 30</div><p>Best at separating names that belonged inside versus outside the selected 30-name book.</p></div>
+      <div class="card good"><div class="metric">19.05%</div><div class="metric-label">Anonymized V2 · rank decay</div><p>Best at ordering names within the pool when portfolio weights became sensitive to rank.</p></div>
+      <div class="card warn"><div class="metric">Not random</div><div class="metric-label">Equal-top-30 placebo test</div><p>Visible ranked at the 99.7th percentile and anonymized at the 96.2nd versus 2,000 randomized selections.</p></div>
+    </div>
+    <div class="grid-2" style="margin-top:20px;">
+      <div class="card">
+        <h3>Classification versus within-pool ranking</h3>
+        <table><thead><tr><th>Score source</th><th>Equal top 30</th><th>Rank decay h10</th><th>Effect</th></tr></thead><tbody>
+          <tr><td>Ticker-visible V2</td><td class="highlight">16.22%</td><td>13.98%</td><td>−2.24pp</td></tr>
+          <tr><td>Anonymized V2</td><td>14.33%</td><td class="highlight">19.05%</td><td>+4.72pp</td></tr>
+        </tbody></table>
+      </div>
+      <div class="card">
+        <h3>What the two results actually mean</h3>
+        <ul class="tight">
+          <li><strong>Visible V2:</strong> ticker identity improved the coarse top-30 cutoff, but score order inside that group was not reliably monotonic.</li>
+          <li><strong>Anonymized V2:</strong> the cutoff result was weaker, but relative rank carried more information when higher ranks received more weight.</li>
+          <li><strong>Percentiles:</strong> both equal-weight selections beat most random alternatives; 99.7 versus 96.2 is not proof that visibility improves ranking.</li>
+          <li><strong>Score magnitude:</strong> raw-score sizing produced 14.33%—essentially no CAGR improvement over equal weighting.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="takeaway"><strong>Production implication:</strong> use anonymized scores to choose the top 30, but keep those names equally weighted. The development ranking result is informative—not sufficient evidence to deploy rank concentration.</div>
+    <div class="source">Sources: autoresearch_v2_cache_sweep/random_ranking_placebo.csv; rank_vs_raw_score_tests.csv; candidate_pool_selector_decomposition.csv</div>
+    <div class="slide-number">9</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Construction research</div>
+    <h2>Concentration improved development headlines—but the gains did not survive validation</h2>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Anonymized V2 construction results across periods</h3>
+        <table><thead><tr><th>Construction</th><th>2009–14</th><th>2015–19</th><th>vs 30/30</th></tr></thead><tbody>
+          <tr class="highlight"><td>Equal 30 long / 30 short</td><td>14.31%</td><td>2.62%</td><td>Production anchor</td></tr>
+          <tr><td>Exponential h10 · both sides</td><td>19.02%</td><td>−1.59%</td><td>+4.71pp → −4.21pp</td></tr>
+          <tr><td>Equal 15 long / 30 short</td><td>19.37%</td><td>2.40%</td><td>+5.07pp → −0.22pp</td></tr>
+          <tr><td>Equal 30 long / 10 short</td><td>15.51%</td><td>0.88%</td><td>+1.20pp → −1.74pp</td></tr>
+          <tr><td>Top-10 exponential h1</td><td>34.77%</td><td>−13.95%</td><td>Validation DD −72.17%</td></tr>
+        </tbody></table>
+        <p class="small" style="margin-top:12px;">CAGR; development used the no-glossary cache and validation used the glossary cache. Compare constructions within each period—not the periods as a clean prompt A/B.</p>
+      </div>
+      <div class="card warn">
+        <h3>Why the headline winners were rejected</h3>
+        <ul>
+          <li><strong>Exponential weighting:</strong> the 2009–2014 lift reversed in 2015–2019; the weighted book lost money while equal 30/30 stayed positive.</li>
+          <li><strong>Long concentration:</strong> 15 longs looked much better in development, but finished slightly below 30 longs in validation.</li>
+          <li><strong>Short concentration:</strong> 10 shorts added 1.20pp in development, then trailed the 30-short book by 1.74pp in validation.</li>
+          <li><strong>Extreme top-10/h1:</strong> 34.77% was a search-selected development headline; validation collapsed to −13.95% with a −72.17% drawdown.</li>
+          <li><strong>Raw-score weighting:</strong> 14.33% versus 14.33% equal weight gave no development CAGR case for cardinal sizing.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="takeaway"><strong>Decision:</strong> retain equal-weight 30/30 and the 50/50 long–short split. Use scores for selection only; reject exponential weighting, score-proportional sizing, and concentrated shorts.</div>
+    <div class="source">Sources: phase2_validation_tracker/cross_period_autoresearch_detail.csv; autoresearch_v2_cache_sweep/rank_vs_raw_score_tests.csv; top10_exponential_weighting.csv</div>
+    <div class="slide-number">10</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Side asymmetry</div>
+    <h2>Development attribution favored longs—but it did not justify concentrated production weights</h2>
+    <div class="grid-3">
+      <div class="card good"><div class="metric">+4.85pp</div><div class="metric-label">Long-selection lift</div><p>In 2009–2014, replacing Trail5 with anonymized V2 on longs raised CAGR from 12.01% to 16.86% under the same h10 wrapper.</p></div>
+      <div class="card"><div class="metric">+2.06pp</div><div class="metric-label">Short-selection lift</div><p>Replacing only the short ranking raised development CAGR from 12.01% to 14.07% under that wrapper.</p></div>
+      <div class="card warn"><div class="metric">+7.01pp</div><div class="metric-label">Joint development lift</div><p>Using V2 on both sides reached 19.02% versus 12.01% for Trail5—but this wrapper later lost money in validation.</p></div>
+    </div>
+    <div class="grid-2" style="margin-top:20px;">
+      <div class="card info">
+        <h3>What visible versus anonymized actually showed</h3>
+        <ul class="tight">
+          <li><strong>Equal-weight top 30:</strong> visible V2 led anonymized V2, 16.22% to 14.33%.</li>
+          <li><strong>Rank-decay h10:</strong> anonymized V2 led visible V2, 19.05% to 13.98%.</li>
+          <li>The visible scores were better at the coarse top-30 cutoff; the anonymized scores had the stronger ordering inside the pool.</li>
+          <li>These are development diagnostics. The later failure of rank weighting overrides the attractive 19.05% headline.</li>
+        </ul>
+      </div>
+      <div class="card warn">
+        <h3>Why we did not concentrate the short book</h3>
+        <ul class="tight">
+          <li>Research searched six short-concentration settings and then retained the best-looking one.</li>
+          <li>After accounting for that search, randomized rankings produced an equally strong or stronger winner 7.35% of the time—not below the conventional 5% threshold.</li>
+          <li>More importantly, validation was worse: 10 shorts returned 0.88% CAGR versus 2.62% for the diversified 30-short book.</li>
+          <li>The short-ranking signal was therefore suggestive in development, not robust enough to size aggressively.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="takeaway"><strong>Decision:</strong> keep 30 equal-weight shorts. If a future asymmetric design is tested, start with the long sleeve and require an untouched-period confirmation before changing production weights.</div>
+    <div class="source">Sources: autoresearch_v2_cache_sweep/anonymized_exponential_2x2_isolation.csv; short_rank_concentration_search_null.csv; phase2_validation_tracker/cross_period_autoresearch_detail.csv</div>
+    <div class="slide-number">11</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">What did not work</div>
+    <h2>Added context usually improved the story more than the portfolio</h2>
+    <table>
+      <thead><tr><th>Experiment</th><th>Hypothesis</th><th>Result</th><th>Decision</th></tr></thead>
+      <tbody>
+        <tr class="fail"><td>V2.1 residual prompt</td><td>Force evidence beyond Trail5</td><td>7.2% CAGR; 0.736 Sharpe</td><td><span class="pill bad">Reject</span></td></tr>
+        <tr class="fail"><td>V2.2 adjustment</td><td>Small contextual overlay on Trail5</td><td>Best 12.6%; below Trail5</td><td><span class="pill bad">Reject</span></td></tr>
+        <tr><td>V2.4 raw SPY/VIX</td><td>Replace semantic regime label with measurements</td><td>13.0% vs 13.2% Trail5; IC/DD improved</td><td><span class="pill warn">Diagnostic only</span></td></tr>
+        <tr class="fail"><td>V2.5 memory</td><td>Past-only analog outcomes improve selection</td><td>10.5%; −1.7pp vs fresh V2, −2.6pp vs Trail5</td><td><span class="pill bad">Reject</span></td></tr>
+        <tr class="fail"><td>V2.6 full rewrite</td><td>More explicit production prompt improves discipline</td><td>12.27%; −1.31pp vs frozen V2</td><td><span class="pill bad">Reject</span></td></tr>
+        <tr class="fail"><td>Regime mapping search</td><td>Switch among four weighting arms by regime</td><td>Best CAGR was only 43rd percentile of shuffled searches</td><td><span class="pill bad">Optimization tax</span></td></tr>
+      </tbody>
+    </table>
+    <div class="takeaway"><strong>General lesson:</strong> a plausible economic narrative is not evidence. Context, memory, and regime logic remain unproven unless they improve a paired portfolio comparison and survive search-aware diagnostics.</div>
+    <div class="source">Sources: prompt scorecards; v24_v25_followup_report.html; v25 memory postmortem; regime_mapping_search_placebo.csv</div>
+    <div class="slide-number">12</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">2015–2019 validation</div>
+    <h2>Explaining the input features helped the diversified 30/30 book—but not every construction</h2>
+    <div class="card info" style="padding:13px 18px;margin-bottom:18px;">
+      <p style="margin:0;"><strong>What “glossary” means:</strong> a section of the prompt that defines every supplied feature and its scale—for example, Trail5 is the trailing five-day return, RSI5 is five-day RSI, and Rng55 is the stock’s position within its 55-day range. Both variants received the feature values; only the glossary variant received these explanations.</p>
+    </div>
+    <div class="grid-3">
+      <div class="card"><div class="metric">1.56%</div><div class="metric-label">Deterministic Trail5 control</div><p>No LLM; equal-weight 30 longs and 30 shorts.</p></div>
+      <div class="card bad"><div class="metric red">0.90%</div><div class="metric-label">V2 without feature explanations</div><p>Underperformed Trail5 by 0.66pp.</p></div>
+      <div class="card good"><div class="metric accent">2.62%</div><div class="metric-label">V2 with feature explanations</div><p>Beat Trail5 by 1.06pp and no-glossary V2 by 1.72pp.</p></div>
+    </div>
+    <div class="grid-2" style="margin-top:20px;">
+      <div class="card good">
+        <h3>What the clean 30/30 comparison showed</h3>
+        <ul class="tight">
+          <li>Adding feature definitions raised V2 CAGR from 0.90% to 2.62% with dates, pools, accounting, and portfolio construction held fixed.</li>
+          <li>Glossary V2 also beat the 1.56% Trail5 control.</li>
+          <li>Versus Trail5, Sharpe improved from 0.203 to 0.304 and max drawdown improved from −15.07% to −13.15%.</li>
+        </ul>
+      </div>
+      <div class="card warn">
+        <h3>Why this is not “the glossary always helps”</h3>
+        <ul class="tight">
+          <li>When the same scores were used in six concentrated or aggressively weighted portfolios, no-glossary V2 was stronger in five.</li>
+          <li>The benefit therefore interacted with how names were selected and weighted; it was not a universal improvement in every portfolio.</li>
+          <li>Those concentrated wrappers were themselves unstable, so they do not overturn the clean 30/30 result.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="takeaway"><strong>Decision:</strong> retain the feature glossary for the production equal-weight 30/30 book. Treat its benefit as specific to that tested construction—not as permission to deploy concentrated weighting.</div>
+    <div class="source">Source: phase2_validation_tracker/phase2_scorecard.csv, Validation 2015–2019 glossary and no-glossary rows</div>
+    <div class="slide-number">13</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Evidence classification</div>
+    <h2>What we can say confidently—and what remains a hypothesis</h2>
+    <div class="matrix">
+      <div class="cell" style="border-left:6px solid var(--green);"><h3>Robust enough for the incumbent</h3><ul class="tight"><li>Deterministic reversal pool + LLM selector</li><li>Anonymized inputs for defensible research</li><li>Glossary on the diversified 30/30 book</li><li>Equal weights, 50/50 capital split, strict schema</li><li>No memory or score-proportional sizing</li></ul></div>
+      <div class="cell" style="border-left:6px solid var(--amber);"><h3>Contradictory / construction-dependent</h3><ul class="tight"><li>Glossary helps 30/30 but not most concentrated wrappers</li><li>Visible wins equal-weight CAGR; anonymized wins some rank wrappers</li><li>Temperature rankings change by metric</li><li>Long and short sleeves respond differently</li></ul></div>
+      <div class="cell" style="border-left:6px solid var(--red);"><h3>Rejected, overfit, or underpowered</h3><ul class="tight"><li>Temperature 1.5: below Trail5 plus schema incident</li><li>Regime mappings after 256-way search</li><li>Extreme top-10 exponential concentration</li><li>Rank-1 short conclusion</li><li>Long-decay +0.8pp with p = 0.339</li></ul></div>
+      <div class="cell" style="border-left:6px solid var(--blue);"><h3>Best challenger; validation pending</h3><ul class="tight"><li>One-line challenger at preferred temperature 1.0</li><li>It is better than V2 as a complete development configuration</li><li>Prompt-only attribution versus frozen V2 remains model-confounded</li><li>Any production change to asymmetric sleeve design</li></ul></div>
+    </div>
+    <div class="source">Sources: consolidated evidence across prompt_engineering_dashboard.html, autoresearch_report.html, and phase2_scorecard.csv</div>
+    <div class="slide-number">14</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Recommended production specification</div>
+    <h2>Keep V2 as the incumbent while advancing the better one-line challenger</h2>
+    <div class="grid-2">
+      <div class="card good">
+        <h3>Production incumbent</h3>
+        <table><tbody>
+          <tr><td>Scorer</td><td><strong>mean_reversion_llm_v2.py · V2</strong></td></tr>
+          <tr><td>Inputs</td><td>Anonymized SEC identifiers + glossary</td></tr>
+          <tr><td>Temperature</td><td>0.6; thinking disabled</td></tr>
+          <tr><td>Pool / book</td><td>60 candidates → top 30 per side</td></tr>
+          <tr><td>Portfolio</td><td>Equal weight; 50% long / 50% short</td></tr>
+          <tr><td>Memory / sizing</td><td>None; no score-proportional weights</td></tr>
+          <tr><td>Contract</td><td>Existing strict JSON, score 0–100</td></tr>
+        </tbody></table>
+      </div>
+      <div class="card info">
+        <h3>Preferred successor: one-line challenger</h3>
+        <table><tbody>
+          <tr><td>Prompt</td><td><strong>Minimal-change control</strong></td></tr>
+          <tr><td>Preferred temperature</td><td><strong>1.0 for validation</strong></td></tr>
+          <tr><td>Why 1.0</td><td>Highest development CAGR and better drawdown; 0.6 had slightly better Sharpe/IC</td></tr>
+          <tr><td>Advantage vs V2</td><td>+3.20pp CAGR; 1.400 vs 1.153 Sharpe</td></tr>
+          <tr><td>Keep fixed</td><td>Every other production field</td></tr>
+          <tr><td>Status</td><td><span class="pill warn">Do not promote yet</span></td></tr>
+        </tbody></table>
+      </div>
+    </div>
+    <div class="takeaway"><strong>Recommendation:</strong> the one-line challenger is better than V2 in development and should be the preferred successor. Run it at temperature 1.0 once on the locked 2015–2019 window against the already-cached incumbent and Trail5 before replacing V2.</div>
+    <div class="source">Sources: incumbent_spec in run_config.json; v2_prompt_ab_2009_2014 scorecards; phase2 validation protocol</div>
+    <div class="slide-number">15</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Decision gate</div>
+    <h2>The smallest next experiment is a single locked challenger validation</h2>
+    <div class="grid-4">
+      <div class="card info"><div class="metric">1</div><div class="metric-label">Run</div><p>One-line challenger, temperature 1.0, 2015–2019, identical 60→30 equal-weight harness.</p></div>
+      <div class="card info"><div class="metric">2</div><div class="metric-label">Cached controls</div><p>Reuse the frozen V2 incumbent and deterministic Trail5; do not repurchase the same controls.</p></div>
+      <div class="card info"><div class="metric">3</div><div class="metric-label">Predefined decision</div><p>Require positive paired lift, acceptable drawdown, valid schema completion, and no wrapper retuning.</p></div>
+      <div class="card warn"><div class="metric">4</div><div class="metric-label">Future: reasoner</div><p>Test a reasoning-capable model after challenger validation, holding the one-line prompt, candidate pools, book, schema, and accounting fixed.</p></div>
+    </div>
+    <div class="card" style="margin-top:24px;">
+      <h3>Promotion rule</h3>
+      <p>Promote the challenger only if it improves the primary 30/30 portfolio on the locked validation period without relying on a new temperature, new concentration level, new side weighting, or post-result prompt edits.</p>
+    </div>
+    <div class="takeaway warning"><strong>Optional causal audit:</strong> a same-model exact-V2 run would isolate prompt effect from model effect. It is useful for scientific attribution, but not necessary to compare the two complete production configurations.</div>
+    <div class="source">Reasoner experiment should compare performance, schema reliability, latency, and token cost under the same frozen portfolio harness.</div>
+    <div class="slide-number">16</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Appendix · prompt and schema contract</div>
+    <h2>The LLM ranks candidates; Python validates the response and builds the portfolio</h2>
+    <p style="max-width:1120px;">The model is one controlled ranking step inside a deterministic pipeline. It cannot add securities, switch their side, choose the final book, or set position weights.</p>
+    <div class="flow" style="grid-template-columns:repeat(5,1fr);margin-top:18px;">
+      <div class="node">1. Code supplies<br><strong>60 long + 60 short candidates</strong></div>
+      <div class="node">2. Prompt explains<br><strong>features and scoring task</strong></div>
+      <div class="node">3. LLM returns<br><strong>one score for all 120 names</strong></div>
+      <div class="node">4. Code validates and selects<br><strong>top 30 per side</strong></div>
+      <div class="node">5. Code constructs<br><strong>equal-weight 50/50 book</strong></div>
+    </div>
+    <div class="grid-2" style="margin-top:24px;">
+      <div class="card info">
+        <h3>What the LLM is allowed to return</h3>
+        <div class="quote">long_scores: 60 × { supplied long ID, score 0–100 }
+short_scores: 60 × { supplied short ID, score 0–100 }</div>
+        <ul class="tight">
+          <li>Every supplied identifier appears exactly once on its original side.</li>
+          <li>Scores express relative ordering within the long or short candidate pool.</li>
+          <li>No rationales, labels, security additions, selections, weights, or commentary.</li>
+        </ul>
+      </div>
+      <div class="card good">
+        <h3>What deterministic Python controls</h3>
+        <ul class="tight">
+          <li>Reject malformed JSON, missing or duplicate IDs, wrong-side names, and scores outside 0–100.</li>
+          <li>Sort each side by score and select exactly 30 longs and 30 shorts.</li>
+          <li>Assign equal weights and maintain the fixed 50/50 long–short capital split.</li>
+          <li>Only a validated response can enter the cache and backtest.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="takeaway"><strong>Concrete safety example:</strong> the temperature-1.5 run returned a score of 800. Validation rejected that response, so it could not affect portfolio selection or reported performance.</div>
+    <div class="source">Source: mean_reversion_llm_v2.py V2_SYSTEM_PROMPT and V2_MINIMAL_CHANGE_CONTROL_PROMPT; mean_reversion_llm_v1.py validate_llm_scores</div>
+    <div class="slide-number">17</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Appendix · source map</div>
+    <h2>Every headline in the deck is traceable to a completed artifact</h2>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Primary dashboards</h3>
+        <ul class="tight">
+          <li>backtest_results/llm_reversal_signal_v2_2009_2014/<strong>prompt_engineering_dashboard.html</strong></li>
+          <li>…/autoresearch_v2_cache_sweep/<strong>autoresearch_report.html</strong></li>
+          <li>…/<strong>phase2_validation_dashboard.html</strong></li>
+          <li>…/<strong>mean_reversion_research_dashboard.html</strong></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Key result tables</h3>
+        <ul class="tight">
+          <li>v2_prompt_ab_2009_2014/*/comparison_scorecard.csv</li>
+          <li>autoresearch_v2_cache_sweep/comparison_scorecard.csv</li>
+          <li>random_ranking_placebo.csv; block_bootstrap_vs_v2.csv</li>
+          <li>rank_vs_raw_score_tests.csv; regime_mapping_search_placebo.csv</li>
+          <li>phase2_validation_tracker/phase2_scorecard.csv</li>
+          <li>minimal_change_temp1p5_incidents.json</li>
+        </ul>
+      </div>
+    </div>
+    <div class="card" style="margin-top:20px;">
+      <h3>Audit scope</h3>
+      <p>600 development/validation HTML, CSV, and JSON artifacts were read successfully (1.20 GB; zero read/parse failures). Later-period result directories were excluded from the presentation synthesis.</p>
+    </div>
+    <div class="source">Deck generated from local research artifacts on 2026-07-24</div>
+    <div class="slide-number">18</div>
+  </section>
+
+</main>
+<div class="controls">
+  <button id="prev" aria-label="Previous slide">←</button>
+  <button id="next" aria-label="Next slide">→</button>
+</div>
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  const deck = document.querySelector('.deck');
+  const baseWidth = 1440;
+  const baseHeight = 810;
+  let index = Math.max(0, Math.min(slides.length - 1, Number(location.hash.slice(1)) - 1 || 0));
+  function fitDeck() {
+    if (window.innerWidth <= 900) {
+      document.documentElement.style.removeProperty('--deck-scale');
+      deck.style.width = '';
+      deck.style.height = '';
+      return;
+    }
+    const margin = 24;
+    const scale = Math.min(
+      1,
+      (window.innerWidth - margin) / baseWidth,
+      (window.innerHeight - margin) / baseHeight
+    );
+    document.documentElement.style.setProperty('--deck-scale', String(scale));
+    deck.style.width = `${baseWidth * scale}px`;
+    deck.style.height = `${baseHeight * scale}px`;
+  }
+  function show(n) {
+    index = (n + slides.length) % slides.length;
+    slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+    history.replaceState(null, '', `#${index + 1}`);
+    document.title = `${index + 1}/${slides.length} · Mean-Reversion LLM Research Review`;
+  }
+  document.getElementById('prev').onclick = () => show(index - 1);
+  document.getElementById('next').onclick = () => show(index + 1);
+  document.addEventListener('keydown', event => {
+    if (['ArrowRight', 'PageDown', ' ', 'Enter'].includes(event.key)) show(index + 1);
+    if (['ArrowLeft', 'PageUp', 'Backspace'].includes(event.key)) show(index - 1);
+    if (event.key === 'Home') show(0);
+    if (event.key === 'End') show(slides.length - 1);
+  });
+  window.addEventListener('resize', fitDeck);
+  fitDeck();
+  show(index);
+</script>
+</body>
+</html>

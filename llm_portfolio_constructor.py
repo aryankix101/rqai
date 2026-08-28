@@ -1037,7 +1037,12 @@ def main():
     parser.add_argument("--rebalance-days", type=int, default=10, help="Rebalance frequency (default: 10)")
     parser.add_argument("--resume", action="store_true", default=True, help="Resume from cache (default: True)")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh, ignore cache")
-    parser.add_argument("--temperature", type=float, default=0.6, help="LLM temperature (default: 0.6; ignored by deepseek-reasoner)")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.6,
+        help="LLM temperature (default: 0.6; ignored when DeepSeek thinking mode is enabled)",
+    )
     parser.add_argument("--top-n", type=int, default=60, help="Top-N magnitude candidates for LLM (default: 60)")
     parser.add_argument(
         "--positions-per-side",

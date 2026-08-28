@@ -6,6 +6,10 @@ out/
 backtest_results/
 debug_pull/
 local_archive/
+# Local historical snapshots retained for reference, not for publication.
+archive/completed_v2_experiments/
+archive/completed_v2_tests/
+archive/legacy_docs/
 VIXCLS.csv
 WM1NS.csv
 WM2NS.csv
