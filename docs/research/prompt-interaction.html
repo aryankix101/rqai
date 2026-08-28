@@ -1,0 +1,33 @@
+<!--
+  Purpose: Publish a self-contained page from the mean-reversion LLM research
+  dashboard suite. Regenerate with scripts/export_research_site.py.
+-->
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Mean-Reversion Thesis Package</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:1500px;margin:32px auto;padding:0 20px;color:#172033}
+h1,h2{color:#102044} .warning{background:#fff4dc;border:1px solid #e2a436;padding:14px}
+.ok{background:#e9f8ef;border:1px solid #39965b;padding:14px} table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid #d8deea;padding:7px;text-align:right} th:first-child,td:first-child{text-align:left}
+code{background:#eef1f6;padding:2px 4px}</style></head><body>
+<h1>Conditional Mean-Reversion Ranking Thesis</h1>
+<p class="warning"><strong>Blind-validation readiness:</strong> NOT READY</p>
+<p>Development-only research. No 2015+ artifact is read by this package.</p>
+<h2>Robustness-first candidate comparison</h2><table><thead><tr><th>label</th><th>paired_lift_pct</th><th>ci_low_pct</th><th>probability_positive</th><th>block_stability_pct</th><th>trimmed_5pct_lift_pct</th><th>long_lift_pct</th><th>short_lift_pct</th><th>sharpe_lift</th><th>drawdown_improvement_pct</th><th>weak_state_lift_pct</th></tr></thead><tbody><tr><td>20260802 G0_05 de-prescribed context</td><td>1.265</td><td>-1.918</td><td>0.788</td><td>75.000</td><td>-1.212</td><td>1.084</td><td>0.181</td><td>0.157</td><td>1.324</td><td>1.765</td></tr><tr><td>20260806 G0_02 expected-magnitude scoring</td><td>1.057</td><td>-2.066</td><td>0.742</td><td>75.000</td><td>-2.380</td><td>0.025</td><td>1.032</td><td>0.143</td><td>1.689</td><td>3.020</td></tr><tr><td>20260806 G0_01 proportional separation</td><td>1.160</td><td>-1.874</td><td>0.767</td><td>50.000</td><td>-2.304</td><td>-0.121</td><td>1.281</td><td>0.150</td><td>3.342</td><td>-1.762</td></tr><tr><td>20260807 G0_02 exhaustion-context rubric</td><td>0.225</td><td>-4.130</td><td>0.532</td><td>25.000</td><td>-4.073</td><td>-0.766</td><td>0.991</td><td>0.132</td><td>2.728</td><td>-3.700</td></tr></tbody></table>
+<p>Provisional primary: <strong>20260802 G0_05 de-prescribed context</strong>. Provisional challenger: <strong>20260806 G0_02 expected-magnitude scoring</strong>. These are not frozen prompts.</p>
+<p>The shortlist explicitly preserves complementary mechanisms: the old G0_05 is predominantly long-driven, while 20260806 G0_02 is predominantly short-driven and avoids material long-side damage. Headline CAGR is not a selection key.</p>
+<h2>Fresh A/B/C/D prompt interaction</h2><table><thead><tr><th>arm</th><th>status</th><th>decision</th><th>paired_lift_pct</th><th>ci_95_pct</th><th>positive_probability_pct</th><th>block_stability_pct</th><th>trimmed_5pct_lift_pct</th><th>long_lift_pct</th><th>short_lift_pct</th></tr></thead><tbody><tr><td>B</td><td>completed (251/251)</td><td>retain</td><td>1.709</td><td>[-1.49, 4.98]</td><td>84.640</td><td>75.000</td><td>-1.603</td><td>-0.396</td><td>2.105</td></tr><tr><td>C</td><td>completed (251/251)</td><td>reject</td><td>-0.896</td><td>[-4.24, 2.28]</td><td>29.960</td><td>25.000</td><td>-3.878</td><td>-0.581</td><td>-0.314</td></tr><tr><td>D</td><td>incomplete (137/251)</td><td>prune — interaction futility; not statistically rejected</td><td>not computed</td><td>not computed</td><td>not computed</td><td>not computed</td><td>not computed</td><td>not computed</td><td>not computed</td></tr></tbody></table>
+<p><strong>Control design:</strong> A was collected once alongside B, then frozen and reused unchanged for C and D. The arms did not receive fresh controls.</p>
+<p><strong>A:</strong> The shared capital-normalized control produced 12.66% CAGR, 1.094 Sharpe, and -8.76% maximum drawdown.</p>
+<p><strong>B:</strong> Neutral/de-prescribed context produced 14.54% CAGR, 1.195 Sharpe, and -8.40% maximum drawdown. It improved the short book by 2.11 annualized percentage points while the long book declined 0.40 points. Its +1.71-point headline lift is promising but concentrated: the 95% interval crosses zero and its best-5%-trimmed lift is -1.60 points. Retain it as a development candidate, not a validated winner.</p>
+<p><strong>C:</strong> Forced use of the full 0-100 range with distinct proportional scores produced 11.64% CAGR, 1.002 Sharpe, and -10.37% maximum drawdown. It lost 0.90 annualized points versus A, damaged both sides, and was positive in only 25% of chronological blocks. Reject it.</p>
+<p><strong>D prompt:</strong> Combined B's neutral context with C's rule: <code>Use the full 0-100 range. Two tickers that differ on a signal must receive distinct scores proportional to the signal's magnitude.</code> Everything else remained fixed and tickers stayed anonymous. D produced 137/251 cached dates through 2011-09-16 (142 calls; 250,275 output tokens), then stopped on a DeepSeek 402 payment error. No portfolio-return result was produced, so no interim CAGR or lift is claimed.</p>
+<p><strong>D decision:</strong> Prune for interaction futility because its only additional proposition is that B rescues C's already harmful rule. Preserve the cache and label D incomplete—not statistically rejected. No additive effect was assumed, and the blind period remains untouched.</p>
+
+<h2>Strongest evidence supporting the thesis</h2><p>The LLM beat the same-information nonlinear tabular model by 3.42 annualized percentage points on their common past-only evaluation window; the strongest weakest-factor-quintile result was 3.02 points for 20260806 G0_02 expected-magnitude scoring.</p>
+<h2>Strongest evidence against the thesis</h2><p>Every tested prompt has a 95% paired-lift interval crossing zero and negative lift after removing its best 5% of dates; the apparent edge is concentrated and remains model/prompt dependent.</p>
+<h2>Required before blind validation</h2><ul><li>Predeclared B/C/D runs against the single shared fresh A control, or their paired analysis, are incomplete.</li><li>No shortlisted prompt retains positive lift after removing its best 5% of dates.</li><li>No shortlisted prompt has a full-development 95% paired-lift lower bound above zero.</li><li>Weak-state lift does not yet have a 95% interval entirely above zero.</li></ul>
+<h2>Uncertainty and non-LLM checks</h2>
+<p>Low-disagreement consensus outperformed high-disagreement consensus: <strong>True</strong>.</p>
+<p>LLM beat the same-information nonlinear tabular baseline: <strong>True</strong>.</p>
+</body></html>

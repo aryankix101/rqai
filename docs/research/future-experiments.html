@@ -1,0 +1,189 @@
+<!--
+  Purpose: Publish a self-contained page from the mean-reversion LLM research
+  dashboard suite. Regenerate with scripts/export_research_site.py.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mean-Reversion Future Experiments</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --ink: #17222d;
+      --muted: #687589;
+      --line: #d8e0e8;
+      --head: #edf2f6;
+      --accent: #247665;
+      --accent-soft: #edf8f5;
+      --warn-soft: #fff7e8;
+      --shadow: 0 14px 34px rgba(22, 33, 44, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    a { color: inherit; }
+    h1 { margin: 0 0 8px; font-size: clamp(30px, 4vw, 46px); line-height: 1.05; letter-spacing: 0; }
+    h2 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 0 0 8px; font-size: 17px; letter-spacing: 0; }
+    p { margin: 0 0 10px; color: var(--muted); }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 22px;
+    }
+    .brand { font-weight: 900; color: #203129; }
+    .nav { display: flex; flex-wrap: wrap; gap: 8px; }
+    .nav a {
+      text-decoration: none;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 13px;
+      font-weight: 800;
+      color: #2a3b34;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(280px, .8fr);
+      gap: 18px;
+      align-items: stretch;
+      margin-bottom: 18px;
+    }
+    .hero-card, section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+    .eyebrow {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .lead { color: #334252; font-size: 18px; max-width: 850px; }
+    .summary-list {
+      margin: 12px 0 0;
+      padding-left: 18px;
+      color: #334252;
+      font-weight: 650;
+    }
+    .summary-list li { margin: 8px 0; }
+    section { margin-bottom: 18px; }
+    .callout {
+      background: var(--accent-soft);
+      border-left: 5px solid var(--accent);
+      color: #244d44;
+      padding: 13px 14px;
+      margin: 14px 0;
+      font-weight: 750;
+    }
+    .warning { background: var(--warn-soft); border-left-color: #b5812d; color: #6f4b00; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      margin-top: 12px;
+    }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    th {
+      text-align: left;
+      background: var(--head);
+      color: #263647;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      white-space: nowrap;
+    }
+    th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tbody tr:nth-child(even) { background: #fafcfd; }
+    @media (max-width: 860px) {
+      main { padding: 18px; }
+      .topbar, .hero { display: block; }
+      .nav { margin-top: 12px; }
+      .hero-card { margin-bottom: 14px; }
+    }
+    </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <div class="brand">RQA Mean Reversion Research Suite</div>
+      <nav class="nav">
+        <a href="index.html">Hub</a>
+        <a href="prompt-engineering.html">Prompt Dashboard</a>
+        <a href="autoresearch.html">Autoresearch</a>
+        <a href="out-of-sample.html">Out-of-Sample Testing</a>
+        <a href="#specialized">Specialized Views</a>
+        <a href="#regime">Regime Allocator</a>
+        <a href="#shorts">Short Side</a>
+        <a href="#models">Models</a>
+      </nav>
+    </div>
+
+    <div class="hero">
+      <section class="hero-card">
+        <div class="eyebrow">Future experiments</div>
+        <h1>Test Layers, Not More Blends</h1>
+        <p class="lead">The next research question is whether each specialized LLM view adds incremental out-of-sample value after the previous layer. This page keeps the planning work separate from the dense evidence pages.</p>
+        <div class="callout">Core rule: do not let every view independently score every stock and then average them. Add one layer at a time; if a layer does not add value, delete it.</div>
+      </section>
+      <section class="hero-card">
+        <h2>Locked Lab Bench</h2>
+        <ul class="summary-list">
+          <li>Primary setup: offset 3, 60/60 -> 30/30.</li>
+          <li>Headline accounting: gross fixed 5-trading-day C2C.</li>
+          <li>Primary ranker: anonymized technical view unless the experiment says otherwise.</li>
+          <li>Generated 2026-08-08 12:22:23; no LLM calls or backtests are run here.</li>
+        </ul>
+      </section>
+    </div>
+
+    <section id="specialized">
+      <h2>Specialized LLM Views</h2>
+      <p>Use the same underlying model in isolated jobs. Each view gets a narrow responsibility and is judged by incremental value, not by sounding smart.</p>
+      <div class="table-wrap"><table class="future-table"><thead><tr><th>View</th><th>Responsibility</th><th>What It Should Add</th><th>Failure Rule</th></tr></thead><tbody><tr><td>Anonymous technical</td><td>Rank stocks</td><td>Clean technical ordering without ticker identity priors.</td><td>Delete or demote if it cannot beat Trail5/random-within-pool after costs and block tests.</td></tr><tr><td>Ticker-visible</td><td>Identify identity-based exceptions</td><td>Flag cases where company identity creates genuine exception risk, not broad score averaging.</td><td>Delete if visible-only conviction keeps diluting anonymized long ranks.</td></tr><tr><td>Market-context</td><td>Choose concentration level</td><td>Select how aggressively to use rank concentration based on market state.</td><td>Delete if it cannot beat a simple deterministic regime rule.</td></tr><tr><td>Adversarial critic</td><td>Flag likely ranking failures</td><td>Veto or haircut names with continuation, squeeze, or data-quality failure patterns.</td><td>Delete if vetoes reduce returns or mostly remove winners.</td></tr></tbody></table></div>
+      <div class="callout">Research question: does each specialized view add incremental out-of-sample value after the previous layer?</div>
+      <div class="table-wrap"><table class="future-table"><thead><tr><th>Step</th><th>System</th><th>Question</th><th>Decision Metric</th></tr></thead><tbody><tr><td>1</td><td>Anonymous ranker alone</td><td>How much value comes from pure technical ordinal ranking?</td><td>CAGR/Sharpe lift vs Trail5 and random-within-pool; long/short attribution.</td></tr><tr><td>2</td><td>Add visible critic</td><td>Does ticker identity improve exception handling without diluting anonymized conviction?</td><td>Incremental out-of-sample lift after anonymous ranker; directional disagreement buckets.</td></tr><tr><td>3</td><td>Add regime allocator</td><td>Does market context improve concentration timing?</td><td>Share of oracle switching value captured; beat simple deterministic rule.</td></tr><tr><td>4</td><td>Add adversarial veto</td><td>Can a critic remove likely failures without over-vetoing winners?</td><td>Drawdown and tail-loss reduction with no meaningful CAGR decay.</td></tr></tbody></table></div>
+    </section>
+
+    <section id="regime">
+      <h2>Regime Allocator: LLM vs Deterministic Rule</h2>
+      <p>The current evidence says the strategy's incremental edge is more concentrated in stressed environments: high VIX, weak breadth, SPY below its 200-day average, and recent market selloffs. It is weaker in low-volatility grind-up markets.</p>
+      <div class="table-wrap"><table class="future-table"><thead><tr><th>Allocator</th><th>Rule</th><th>Purpose</th><th>Tradable</th></tr></thead><tbody><tr><td>Fixed</td><td>Always h10</td><td>Current clean benchmark for anonymized exponential ranking.</td><td>Yes</td></tr><tr><td>Simple deterministic</td><td>Stressed market: h10; calm market: h20</td><td>Two-line rule using high VIX, weak breadth, SPY below 200d, and recent selloff evidence.</td><td>Yes</td></tr><tr><td>LLM-selected</td><td>LLM chooses one of {5, 10, 20, 40} from market context only</td><td>Test whether the LLM can allocate concentration better than a deterministic rule.</td><td>Yes</td></tr><tr><td>Oracle upper bound</td><td>Choose the best half-life after observing future returns</td><td>Not tradable; measures maximum theoretical value of perfect switching.</td><td>No</td></tr></tbody></table></div>
+      <div class="callout">The key metric is not just whether dynamic allocation beats fixed h10. The key metric is how much of the oracle's achievable switching value it captures, and whether it beats a two-line deterministic rule.</div>
+      <div class="callout warning">Decision rule: if the LLM allocator cannot beat the simple deterministic regime rule, do not use the LLM for regime allocation.</div>
+    </section>
+
+    <section id="shorts">
+      <h2>Short-Side Specific Experiments</h2>
+      <p>The short side likely needs a different objective. The anonymized model can improve shorts relative to Trail5, but the short leg may still be weak in absolute expectancy. That means the short book might be a hedge or avoidance mechanism rather than a standalone alpha engine.</p>
+      <div class="table-wrap"><table class="future-table"><thead><tr><th>Role</th><th>Prompt Objective</th><th>Correct Benchmark</th><th>What It Tells Us</th></tr></thead><tbody><tr><td>Alpha shorts</td><td>Identify recent winners likely to reverse downward.</td><td>Trail5 shorts, random shorts, and current anonymized short rank.</td><td>Whether the short book has true standalone alpha.</td></tr><tr><td>Hedge shorts</td><td>Choose names that best offset the long book&#x27;s market, sector, or factor exposure.</td><td>SPY hedge, sector ETF hedge, factor-neutral basket, random candidate hedge.</td><td>Whether shorts are useful as cheaper risk control even if raw short alpha is weak.</td></tr><tr><td>Avoidance shorts</td><td>Identify recent winners least likely to keep squeezing upward.</td><td>Did selected shorts lose less than random/Trail5 shorts?</td><td>Whether the model is mainly avoiding bad shorts rather than finding profitable shorts.</td></tr></tbody></table></div>
+      <div class="callout">Correct short-side question: did the model create a cheaper, safer hedge than random, Trail5, SPY, or sector ETFs? A short sleeve can be useful even if it does not have standalone positive alpha.</div>
+    </section>
+
+    <section id="models">
+      <h2>Multi-Model Research Should Be Factorial</h2>
+      <p>When testing other LLMs, do not run a simple horse race for highest CAGR. Run a factorial design so we can estimate model effect, masking effect, model x masking interaction, ranking agreement, and complementary errors.</p>
+      <div class="table-wrap"><table class="future-table"><thead><tr><th>Model</th><th>Anonymous</th><th>Visible</th><th>Measure</th></tr></thead><tbody><tr><td>DeepSeek</td><td>yes</td><td>yes</td><td>Baseline incumbent plus masking interaction.</td></tr><tr><td>Gemini</td><td>yes</td><td>yes</td><td>Model effect and whether masking helps another architecture.</td></tr><tr><td>Claude</td><td>yes</td><td>yes</td><td>Long-rank quality, short protection, complementary errors.</td></tr><tr><td>GPT</td><td>yes</td><td>yes</td><td>Information-design effect versus model-family effect.</td></tr></tbody></table></div>
+      <div class="callout">A stronger conclusion would be: masking helps every model, or only certain models use ticker identity intelligently, or one model ranks longs while another protects shorts. That is more useful than “Model X won the backtest.”</div>
+    </section>
+  </main>
+</body>
+</html>

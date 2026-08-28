@@ -1,0 +1,1723 @@
+<!--
+  Purpose: Publish a self-contained page from the mean-reversion LLM research
+  dashboard suite. Regenerate with scripts/export_research_site.py.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Autoresearch Campaign prompt_search_ticker_optional_20260807</title>
+  <style>
+
+    :root {
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --ink: #17222d;
+      --muted: #687589;
+      --line: #d8e0e8;
+      --head: #edf2f6;
+      --accent: #247665;
+      --accent-soft: #edf8f5;
+      --warn-soft: #fff7e8;
+      --shadow: 0 14px 34px rgba(22, 33, 44, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    a { color: inherit; }
+    h1 { margin: 0 0 8px; font-size: clamp(30px, 4vw, 46px); line-height: 1.05; letter-spacing: 0; }
+    h2 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 0 0 8px; font-size: 17px; letter-spacing: 0; }
+    p { margin: 0 0 10px; color: var(--muted); }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 22px;
+    }
+    .brand { font-weight: 900; color: #203129; }
+    .nav { display: flex; flex-wrap: wrap; gap: 8px; }
+    .nav a {
+      text-decoration: none;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 13px;
+      font-weight: 800;
+      color: #2a3b34;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(280px, .8fr);
+      gap: 18px;
+      align-items: stretch;
+      margin-bottom: 18px;
+    }
+    .hero-card, section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+    .eyebrow {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .lead { color: #334252; font-size: 18px; max-width: 850px; }
+    .summary-list {
+      margin: 12px 0 0;
+      padding-left: 18px;
+      color: #334252;
+      font-weight: 650;
+    }
+    .summary-list li { margin: 8px 0; }
+    section { margin-bottom: 18px; }
+    .callout {
+      background: var(--accent-soft);
+      border-left: 5px solid var(--accent);
+      color: #244d44;
+      padding: 13px 14px;
+      margin: 14px 0;
+      font-weight: 750;
+    }
+    .warning { background: var(--warn-soft); border-left-color: #b5812d; color: #6f4b00; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      margin-top: 12px;
+    }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    th {
+      text-align: left;
+      background: var(--head);
+      color: #263647;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      white-space: nowrap;
+    }
+    th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tbody tr:nth-child(even) { background: #fafcfd; }
+    @media (max-width: 860px) {
+      main { padding: 18px; }
+      .topbar, .hero { display: block; }
+      .nav { margin-top: 12px; }
+      .hero-card { margin-bottom: 14px; }
+    }
+
+    .hero { display: block; }
+    .state-pill {
+      display: inline-block;
+      border: 1px solid #9fc9bd;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #24594d;
+      padding: 6px 10px;
+      margin: 4px 6px 0 0;
+      font-size: 13px;
+      font-weight: 850;
+    }
+    .table-wrap + .table-wrap { margin-top: 16px; }
+    .campaign-prompt-change {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: var(--panel);
+    }
+    .campaign-prompt-change > summary,
+    .campaign-full-prompt > summary { cursor: pointer; color: var(--accent); font-weight: 800; }
+    .campaign-prompt-meta { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+    .campaign-prompt-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .campaign-prompt-diff pre,
+    .campaign-full-prompt pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 34rem; overflow: auto; }
+    .campaign-full-prompt { margin-top: 14px; }
+    .campaign-rejected-prompt { border-left: 5px solid #b55252; }
+    .campaign-lineage td:last-child { white-space: pre-line; line-height: 1.75; min-width: 390px; }
+    .benchmark-heading { display: flex; justify-content: space-between; gap: 18px; align-items: start; }
+    .benchmark-verification { border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 850; white-space: nowrap; }
+    .benchmark-ok { color: #24594d; background: var(--accent-soft); border: 1px solid #9fc9bd; }
+    .benchmark-warning { color: #6f4b00; background: var(--warn-soft); border: 1px solid #d9b567; }
+    .benchmark-grid, .diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-top: 12px; }
+    .benchmark-grid div, .diagnostic-grid div { display: flex; justify-content: space-between; gap: 14px; background: #fff; padding: 9px 11px; }
+    .benchmark-grid span, .diagnostic-grid span { color: var(--muted); }
+    .campaign-diagnostics { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+    .campaign-diagnostics > summary { cursor: pointer; color: var(--accent); font-weight: 850; }
+    .diagnostic-stage { margin-top: 14px; }
+    .diagnostic-stage h4 { margin: 0 0 6px; }
+    .plain-summary { display: grid; gap: 11px; margin-top: 18px; }
+    .plain-summary p { margin: 0; color: #334252; font-size: 16px; }
+    .plain-summary strong { color: var(--ink); }
+    .now-card { border-left: 6px solid var(--accent); }
+    .stopped-card { border-left-color: #b55252; }
+    .research-path { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
+    .path-step { border: 1px solid var(--line); border-radius: 999px; padding: 6px 9px; background: #fff; font-size: 12px; font-weight: 800; }
+    .path-arrow { color: var(--muted); font-weight: 900; }
+    .next-actions { margin: 8px 0 0; padding-left: 22px; color: #334252; }
+    .next-actions li { margin: 7px 0; }
+    .winner-panel { border: 2px solid #75ae9f; box-shadow: 0 16px 38px rgba(36, 118, 101, .14); }
+    .winner-heading { display: flex; justify-content: space-between; align-items: start; gap: 18px; }
+    .winner-heading h2 { font-size: 30px; color: #174f43; }
+    .winner-badge { border-radius: 999px; padding: 7px 12px; color: #174f43; background: #dff4ed; border: 1px solid #75ae9f; font-size: 13px; font-weight: 900; white-space: nowrap; }
+    .winner-metrics { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 10px; margin: 18px 0; }
+    .winner-metrics div { display: grid; gap: 3px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--accent-soft); }
+    .winner-metrics span { color: var(--muted); font-size: 12px; font-weight: 750; }
+    .winner-metrics strong { color: #174f43; font-size: 20px; }
+    .control-comparison { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; margin: 0 0 16px; padding: 12px 14px; border: 1px solid #aebbc7; border-radius: 8px; background: #f4f7f9; color: #334252; }
+    .control-comparison strong { color: var(--ink); }
+    .decision-explanation { color: #334252; }
+    .winner-row { background: #edf8f5 !important; }
+    .validation-action { display: grid; gap: 8px; margin-top: 16px; padding: 14px; border-left: 5px solid var(--accent); background: var(--accent-soft); color: #244d44; }
+    .validation-action code { display: block; overflow-x: auto; padding: 10px 12px; border-radius: 6px; background: #17222d; color: #f5faf8; white-space: nowrap; }
+    @media (max-width: 860px) {
+      .campaign-prompt-diff, .benchmark-grid, .diagnostic-grid { grid-template-columns: 1fr; }
+      .benchmark-heading { display: block; }
+      .benchmark-verification { display: inline-block; margin-top: 8px; }
+      .winner-heading { display: block; }
+      .winner-badge { display: inline-block; margin-top: 8px; }
+      .winner-metrics { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <div class="brand">RQA Mean Reversion Research Suite</div>
+      <nav class="nav">
+        <a href="index.html">Research Hub</a>
+        <a href="#results">What Was Tested</a>
+        <a href="#prompts">Prompt Changes</a>
+        <a href="#failures">What Stopped</a>
+      </nav>
+    </div>
+
+    <div class="hero">
+      <section class="hero-card now-card ">
+        <div class="eyebrow">What is happening now?</div>
+        <h1>prompt_search_ticker_optional_20260807</h1>
+        <p class="lead"><strong>No — nothing is running</strong></p>
+        <span class="state-pill">Status: awaiting_validation_approval</span>
+        <span class="state-pill">Phase: approval</span>
+
+        <div class="plain-summary">
+          <p><strong>Current activity:</strong> No supervisor or experiment runner is active.</p>
+          <p><strong>What completed:</strong> The Pro researcher produced 6 accepted prompt proposals. Completed checkpoints: 5 dates 6, 24 dates 6, 80 dates 3, 251 dates 2.</p>
+          <p><strong>Why it ended:</strong> The campaign has not recorded a terminal reason.</p>
+          <p><strong>Result:</strong> Frozen development winner: G0_02. Validation still requires explicit approval.</p>
+          <p><strong>Last update:</strong> 2026-08-08 18:23</p>
+        </div>
+        <h3>How far down the research tree?</h3>
+        <div class="research-path">
+          <span class="path-step">Proposals: 6 accepted</span><span class="path-arrow">→</span><span class="path-step">5 dates: 6/6 done</span><span class="path-arrow">→</span><span class="path-step">24 dates: 6/6 done</span><span class="path-arrow">→</span><span class="path-step">80 dates: 3/3 done</span><span class="path-arrow">→</span><span class="path-step">251 dates: 2/2 done</span><span class="path-arrow">→</span><span class="path-step">Manual validation approval: waiting</span>
+        </div>
+        <h3>What happens next?</h3>
+        <ol class="next-actions">
+          <li>Review the frozen development winner G0_02.</li><li>Nothing else runs automatically; validation starts only after your explicit approval.</li>
+        </ol>
+      </section>
+    </div>
+
+
+      <section id="decision" class="winner-panel">
+        <div class="eyebrow">Development decision</div>
+        <div class="winner-heading">
+          <div>
+            <h2>Winner: G0_02</h2>
+            <p>Explicitly separating exhaustion and context forces the model to weight both dimensions, potentially yielding scores that better differentiate between pure overshoots and those with reversal-friendly surroundings.</p>
+          </div>
+          <span class="winner-badge">Ready for validation</span>
+        </div>
+        <div class="winner-metrics">
+          <div><span>Gross CAGR</span><strong>13.93%</strong></div>
+          <div><span>Sharpe</span><strong>1.279</strong></div>
+          <div><span>Lift vs control</span><strong>+0.23%</strong></div>
+          <div><span>Sharpe change</span><strong>+0.132</strong></div>
+          <div><span>Max drawdown</span><strong>-7.05%</strong></div>
+        </div>
+        <div class="control-comparison">
+          <strong>v2-minimal-change-control</strong>
+          <span>Gross CAGR: 13.55%</span>
+          <span>Sharpe: 1.147</span>
+        </div>
+        <p class="decision-explanation"><strong>Why it won:</strong> It passed every frozen full-development economic gate and ranked first among qualifying finalists. Metrics are gross and use only the 2009–2014 development period.</p>
+        <div class="table-wrap">
+          <table class="finalist-table">
+            <thead><tr><th>Finalist</th><th>CAGR</th><th>Sharpe</th><th>Lift vs control</th><th>Sharpe change</th><th>Decision</th></tr></thead>
+            <tbody>
+            <tr class="winner-row">
+              <td><strong>G0_02</strong></td>
+              <td>13.93%</td>
+              <td>1.279</td>
+              <td>+0.23%</td>
+              <td>+0.132</td>
+              <td>Winner · passed all development gates</td>
+            </tr>
+
+            <tr class="">
+              <td><strong>G0_03</strong></td>
+              <td>11.72%</td>
+              <td>1.018</td>
+              <td>-1.64%</td>
+              <td>-0.129</td>
+              <td>Pruned · did not improve CAGR or Sharpe vs control; did not beat Trail5 on both CAGR and Sharpe; lift vs control was not positive</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="validation-action">
+          <strong>Next action:</strong> Review this decision, then record approval before starting the frozen 2015–2019 validation.
+          <code>.venv/bin/python mean_reversion_llm_v2_autoresearch.py campaign approve-validation prompt_search_ticker_optional_20260807</code>
+        </div>
+      </section>
+
+
+    <section id="benchmark">
+
+      <div class="benchmark-heading">
+        <div>
+          <h2>Benchmark Behind Every Lift</h2>
+          <p>Every return lift and Sharpe change below compares the candidate with this fresh control.</p>
+        </div>
+        <span class="benchmark-verification benchmark-ok">Frozen pairs verified; backend build ID was not recorded</span>
+      </div>
+      <div class="benchmark-grid"><div><span>Prompt</span><strong>v2-minimal-change-control</strong></div><div><span>Model</span><strong>deepseek-v4-flash</strong></div><div><span>Temperature</span><strong>1</strong></div><div><span>Thinking</span><strong>disabled</strong></div><div><span>Tickers</span><strong>candidate-selected; each full pair audited</strong></div><div><span>Dates</span><strong>identical and paired within every stage</strong></div><div><span>Candidate pools</span><strong>identical</strong></div><div><span>Portfolio construction</span><strong>identical</strong></div><div><span>Returns</span><strong>gross fixed horizon c2c</strong></div><div><span>Prompt hash</span><strong>5300b8966c29</strong></div></div>
+
+    </section>
+
+    <section id="results">
+      <h2>What Was Tested and How Far It Got</h2>
+      <p>This campaign used its frozen 5 → 24 → 80 → 251-date stage sequence: 5 is mechanical-only, 24 is futility-only, 80 is the first economic comparison, and 251 is full paired inference. Return lift is the annualized return difference versus the fresh minimal-change control; Sharpe change is candidate Sharpe minus control Sharpe.</p>
+      <div class="table-wrap"><table class="campaign-lineage"><thead><tr><th>Candidate</th><th>Prompt idea</th><th>Stage performance</th></tr></thead><tbody><tr><td>G0_01</td><td>Allowing ticker familiarity lets the model incorporate persistent behavioral differences (e.g., how a specific stock typically mean-reverts), which can improve cross-sectional ranking by assigning higher scores to stocks with historically more reliable reversal patterns.</td><td>Smoke (5): Completed — return lift +7.35%; Sharpe change +0.204
+Mini (24): Completed — return lift -5.57%; Sharpe change -0.697
+Medium (80): Not reached
+Full (251): Not reached</td></tr><tr><td>G0_02</td><td>Explicitly separating exhaustion and context forces the model to weight both dimensions, potentially yielding scores that better differentiate between pure overshoots and those with reversal-friendly surroundings.</td><td>Smoke (5): Completed — return lift +8.43%; Sharpe change -0.072
+Mini (24): Completed — return lift +3.75%; Sharpe change +0.092
+Medium (80): Completed — return lift -1.71%; Sharpe change -0
+Full (251): Completed — return lift +0.23%; Sharpe change +0.132</td></tr><tr><td>G0_03</td><td>Explicitly linking scores to the expected reversal magnitude using a multiplicative model of move size and exhaustion captures mean reversion more precisely than ordinal descriptions, enhancing cross-sectional discrimination.</td><td>Smoke (5): Completed — return lift +14.70%; Sharpe change +0.304
+Mini (24): Completed — return lift +4.01%; Sharpe change +0.179
+Medium (80): Completed — return lift +0.92%; Sharpe change +0.1
+Full (251): Pruned</td></tr><tr><td>G0_04</td><td>A full rewrite that reframes scoring around exhaustion and context decomposition encourages the model to consider a wider set of features, potentially improving ranking by balancing overextension signals with environmental suitability.</td><td>Smoke (5): Completed — return lift +9.63%; Sharpe change +0.339
+Mini (24): Completed — return lift +5.87%; Sharpe change +0.443
+Medium (80): Completed — return lift -3.09%; Sharpe change -0.218
+Full (251): Not reached</td></tr><tr><td>G0_05</td><td>Adding a signal_strength field injects meta-cognitive pressure, making the model calibrate its confidence and potentially yielding more stable rankings when signal_strength is used as a secondary filter or weighting.</td><td>Smoke (5): Completed — return lift +9.45%; Sharpe change +0.33
+Mini (24): Completed — return lift +2.69%; Sharpe change +0.163
+Medium (80): Not reached
+Full (251): Not reached</td></tr><tr><td>G0_06</td><td>Reformulating to risk-adjusted return potential explicitly forces the model to balance reversal signals against continuation risk, which may yield more robust scores that avoid fading strong trends.</td><td>Smoke (5): Completed — return lift +17.45%; Sharpe change +0.036
+Mini (24): Completed — return lift -0.19%; Sharpe change -0.228
+Medium (80): Not reached
+Full (251): Not reached</td></tr></tbody></table></div>
+      <h3>Detailed Stage Diagnostics</h3>
+      <p>Expand a candidate to inspect side contributions, consistency, and ranking behavior without widening the main table.</p>
+      <details class="campaign-diagnostics"><summary>G0_01 stage diagnostics</summary><div class="diagnostic-stage"><h4>Smoke · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+7.35%</strong></div><div><span>Sharpe change</span><strong>0.204</strong></div><div><span>Paired hit rate</span><strong>100.00%</strong></div><div><span>Long-side lift</span><strong>+8.43%</strong></div><div><span>Short-side lift</span><strong>-1.08%</strong></div><div><span>Block stability</span><strong>100.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Mini · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>-5.57%</strong></div><div><span>Sharpe change</span><strong>-0.697</strong></div><div><span>Paired hit rate</span><strong>45.83%</strong></div><div><span>Long-side lift</span><strong>-1.03%</strong></div><div><span>Short-side lift</span><strong>-4.54%</strong></div><div><span>Block stability</span><strong>25.00%</strong></div></div></div></details><details class="campaign-diagnostics"><summary>G0_02 stage diagnostics</summary><div class="diagnostic-stage"><h4>Smoke · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+8.43%</strong></div><div><span>Sharpe change</span><strong>-0.072</strong></div><div><span>Paired hit rate</span><strong>40.00%</strong></div><div><span>Long-side lift</span><strong>+0.83%</strong></div><div><span>Short-side lift</span><strong>+7.60%</strong></div><div><span>Block stability</span><strong>50.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Mini · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+3.75%</strong></div><div><span>Sharpe change</span><strong>0.092</strong></div><div><span>Paired hit rate</span><strong>50.00%</strong></div><div><span>Long-side lift</span><strong>+5.32%</strong></div><div><span>Short-side lift</span><strong>-1.57%</strong></div><div><span>Block stability</span><strong>75.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Medium · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>-1.71%</strong></div><div><span>Sharpe change</span><strong>-0</strong></div><div><span>Paired hit rate</span><strong>47.50%</strong></div><div><span>Long-side lift</span><strong>-2.91%</strong></div><div><span>Short-side lift</span><strong>+1.20%</strong></div><div><span>Block stability</span><strong>25.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Full · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+0.23%</strong></div><div><span>Sharpe change</span><strong>0.132</strong></div><div><span>Paired hit rate</span><strong>47.01%</strong></div><div><span>Long-side lift</span><strong>-0.77%</strong></div><div><span>Short-side lift</span><strong>+0.99%</strong></div><div><span>Block stability</span><strong>25.00%</strong></div></div></div></details><details class="campaign-diagnostics"><summary>G0_03 stage diagnostics</summary><div class="diagnostic-stage"><h4>Smoke · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+14.70%</strong></div><div><span>Sharpe change</span><strong>0.304</strong></div><div><span>Paired hit rate</span><strong>80.00%</strong></div><div><span>Long-side lift</span><strong>-1.64%</strong></div><div><span>Short-side lift</span><strong>+16.34%</strong></div><div><span>Block stability</span><strong>75.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Mini · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+4.01%</strong></div><div><span>Sharpe change</span><strong>0.179</strong></div><div><span>Paired hit rate</span><strong>50.00%</strong></div><div><span>Long-side lift</span><strong>+4.08%</strong></div><div><span>Short-side lift</span><strong>-0.08%</strong></div><div><span>Block stability</span><strong>75.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Medium · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+0.92%</strong></div><div><span>Sharpe change</span><strong>0.1</strong></div><div><span>Paired hit rate</span><strong>45.00%</strong></div><div><span>Long-side lift</span><strong>-0.46%</strong></div><div><span>Short-side lift</span><strong>+1.37%</strong></div><div><span>Block stability</span><strong>75.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Full · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>-1.64%</strong></div><div><span>Sharpe change</span><strong>-0.129</strong></div><div><span>Paired hit rate</span><strong>46.61%</strong></div><div><span>Long-side lift</span><strong>-2.34%</strong></div><div><span>Short-side lift</span><strong>+0.70%</strong></div><div><span>Block stability</span><strong>25.00%</strong></div></div></div></details><details class="campaign-diagnostics"><summary>G0_04 stage diagnostics</summary><div class="diagnostic-stage"><h4>Smoke · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+9.63%</strong></div><div><span>Sharpe change</span><strong>0.339</strong></div><div><span>Paired hit rate</span><strong>80.00%</strong></div><div><span>Long-side lift</span><strong>-5.28%</strong></div><div><span>Short-side lift</span><strong>+14.92%</strong></div><div><span>Block stability</span><strong>75.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Mini · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+5.87%</strong></div><div><span>Sharpe change</span><strong>0.443</strong></div><div><span>Paired hit rate</span><strong>58.33%</strong></div><div><span>Long-side lift</span><strong>+5.93%</strong></div><div><span>Short-side lift</span><strong>-0.05%</strong></div><div><span>Block stability</span><strong>75.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Medium · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>-3.09%</strong></div><div><span>Sharpe change</span><strong>-0.218</strong></div><div><span>Paired hit rate</span><strong>40.00%</strong></div><div><span>Long-side lift</span><strong>+0.17%</strong></div><div><span>Short-side lift</span><strong>-3.26%</strong></div><div><span>Block stability</span><strong>0.00%</strong></div></div></div></details><details class="campaign-diagnostics"><summary>G0_05 stage diagnostics</summary><div class="diagnostic-stage"><h4>Smoke · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+9.45%</strong></div><div><span>Sharpe change</span><strong>0.33</strong></div><div><span>Paired hit rate</span><strong>80.00%</strong></div><div><span>Long-side lift</span><strong>-2.87%</strong></div><div><span>Short-side lift</span><strong>+12.32%</strong></div><div><span>Block stability</span><strong>75.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Mini · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+2.69%</strong></div><div><span>Sharpe change</span><strong>0.163</strong></div><div><span>Paired hit rate</span><strong>45.83%</strong></div><div><span>Long-side lift</span><strong>+2.64%</strong></div><div><span>Short-side lift</span><strong>+0.05%</strong></div><div><span>Block stability</span><strong>50.00%</strong></div></div></div></details><details class="campaign-diagnostics"><summary>G0_06 stage diagnostics</summary><div class="diagnostic-stage"><h4>Smoke · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>+17.45%</strong></div><div><span>Sharpe change</span><strong>0.036</strong></div><div><span>Paired hit rate</span><strong>80.00%</strong></div><div><span>Long-side lift</span><strong>+0.41%</strong></div><div><span>Short-side lift</span><strong>+17.04%</strong></div><div><span>Block stability</span><strong>100.00%</strong></div></div></div><div class="diagnostic-stage"><h4>Mini · Completed</h4><div class="diagnostic-grid"><div><span>Return lift</span><strong>-0.19%</strong></div><div><span>Sharpe change</span><strong>-0.228</strong></div><div><span>Paired hit rate</span><strong>54.17%</strong></div><div><span>Long-side lift</span><strong>+0.23%</strong></div><div><span>Short-side lift</span><strong>-0.42%</strong></div><div><span>Block stability</span><strong>50.00%</strong></div></div></div></details>
+    </section>
+
+    <section id="prompts">
+      <h3>Proposed Prompt Changes</h3>
+      <p>Open a candidate to see the Researcher's idea, the exact before/after wording, and the complete resulting prompt.</p>
+
+            <details class="campaign-prompt-change">
+              <summary>G0_01 · Allowing ticker familiarity lets the model incorporate persistent behavioral differences (e.g., how a specific stock typically mean-reverts), which can improve cross-sectional ranking by assigning higher scores to stocks with historically more reliable reversal patterns.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> substitutive</span>
+                <span><strong>Native score contract:</strong> 0 to 100, higher is better</span>
+              </div>
+              <p><strong>What changed:</strong> Allowing ticker familiarity lets the model incorporate persistent behavioral differences (e.g., how a specific stock typically mean-reverts), which can improve cross-sectional ranking by assigning higher scores to stocks with historically more reliable reversal patterns.</p>
+              <p><strong>Expected mechanism:</strong> Replaces the opaque-identifier rule with explicit permission to use ticker familiarity, enabling the model to combine quantitative signals with learned stock-specific tendencies.</p>
+              <p><strong>Expected failure:</strong> Ticker familiarity might introduce historical biases or overfitting to past patterns that no longer hold, potentially degrading out-of-sample ranking performance.</p>
+              <div class="campaign-prompt-diff">
+                <div>
+                  <h3>Replaced text</h3>
+                  <pre>- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre>
+                </div>
+                <div>
+                  <h3>New text</h3>
+                  <pre>- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Tickers are visible and their familiarity may be used as a supplementary signal (e.g., prior behavior, sector tendencies).
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre>
+                </div>
+              </div>
+              <details class="campaign-full-prompt">
+                <summary>Show complete resulting prompt</summary>
+                <pre>MEAN-REVERSION CANDIDATE SCORING
+
+CONTEXT
+Mean reversion is the tendency of stocks that have moved sharply in one
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.
+
+TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Tickers are visible and their familiarity may be used as a supplementary signal (e.g., prior behavior, sector tendencies).
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61}]
+}</pre>
+              </details>
+            </details>
+
+            <details class="campaign-prompt-change">
+              <summary>G0_02 · Explicitly separating exhaustion and context forces the model to weight both dimensions, potentially yielding scores that better differentiate between pure overshoots and those with reversal-friendly surroundings.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> additive</span>
+                <span><strong>Native score contract:</strong> 0 to 100, higher is better</span>
+              </div>
+              <p><strong>What changed:</strong> Explicitly separating exhaustion and context forces the model to weight both dimensions, potentially yielding scores that better differentiate between pure overshoots and those with reversal-friendly surroundings.</p>
+              <p><strong>Expected mechanism:</strong> Adds a structured two-factor scoring rubric before the final pool output, improving cross-sectional separation by preventing the model from focusing solely on extreme MRL/MRS.</p>
+              <p><strong>Expected failure:</strong> The fixed 60/40 weighting might be suboptimal for many regimes, and the extra computation could lead to noisier or less stable rankings.</p>
+              <div class="campaign-prompt-diff">
+                <div>
+                  <h3>Replaced text</h3>
+                  <pre>For each ticker in each pool, output a single SCORE (0-100):</pre>
+                </div>
+                <div>
+                  <h3>New text</h3>
+                  <pre>For each ticker in each pool, derive two sub-scores:
+  - Exhaustion Score (0-100): How exhausted the move appears (extreme RSI, volume/climax indications via Rng55, high VolPctl, etc.)
+  - Context Score (0-100): How supportive the environment is (favored regime, trend alignment via ADX, auto-correlation confirming reversal tendency)
+Combine them into a single REVERSION SCORE = (Exhaustion * 0.6 + Context * 0.4). Then map this to a final SCORE (0-100) ranked within the pool:</pre>
+                </div>
+              </div>
+              <details class="campaign-full-prompt">
+                <summary>Show complete resulting prompt</summary>
+                <pre>MEAN-REVERSION CANDIDATE SCORING
+
+CONTEXT
+Mean reversion is the tendency of stocks that have moved sharply in one
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.
+
+TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, derive two sub-scores:
+  - Exhaustion Score (0-100): How exhausted the move appears (extreme RSI, volume/climax indications via Rng55, high VolPctl, etc.)
+  - Context Score (0-100): How supportive the environment is (favored regime, trend alignment via ADX, auto-correlation confirming reversal tendency)
+Combine them into a single REVERSION SCORE = (Exhaustion * 0.6 + Context * 0.4). Then map this to a final SCORE (0-100) ranked within the pool:
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61}]
+}</pre>
+              </details>
+            </details>
+
+            <details class="campaign-prompt-change">
+              <summary>G0_03 · Explicitly linking scores to the expected reversal magnitude using a multiplicative model of move size and exhaustion captures mean reversion more precisely than ordinal descriptions, enhancing cross-sectional discrimination.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> substitutive</span>
+                <span><strong>Native score contract:</strong> 0 to 100, higher is better</span>
+              </div>
+              <p><strong>What changed:</strong> Explicitly linking scores to the expected reversal magnitude using a multiplicative model of move size and exhaustion captures mean reversion more precisely than ordinal descriptions, enhancing cross-sectional discrimination.</p>
+              <p><strong>Expected mechanism:</strong> Replaces qualitative scoring anchors with a parametric formula that directly combines the strength of the prior move with exhaustion signals, promoting consistent monotonic scoring.</p>
+              <p><strong>Expected failure:</strong> The exact functional form may not match real-world reversal dynamics, leading to overconfident scoring or poor calibration, especially if exhaustion indicators are noisy.</p>
+              <div class="campaign-prompt-diff">
+                <div>
+                  <h3>Replaced text</h3>
+                  <pre>For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)</pre>
+                </div>
+                <div>
+                  <h3>New text</h3>
+                  <pre>For each ticker in each pool, output a single SCORE (0-100) that reflects the expected magnitude of the 5-day reversal, estimated as:
+  Raw Magnitude = |Trail5| * (1 - exp(-ExhaustionFactor))
+  ExhaustionFactor = linear combination of RSI5 extremes, Rng55 positioning, VolPctl, and ADX.
+Normalize Raw Magnitude across the pool to 0-100.</pre>
+                </div>
+              </div>
+              <details class="campaign-full-prompt">
+                <summary>Show complete resulting prompt</summary>
+                <pre>MEAN-REVERSION CANDIDATE SCORING
+
+CONTEXT
+Mean reversion is the tendency of stocks that have moved sharply in one
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.
+
+TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100) that reflects the expected magnitude of the 5-day reversal, estimated as:
+  Raw Magnitude = |Trail5| * (1 - exp(-ExhaustionFactor))
+  ExhaustionFactor = linear combination of RSI5 extremes, Rng55 positioning, VolPctl, and ADX.
+Normalize Raw Magnitude across the pool to 0-100.
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61}]
+}</pre>
+              </details>
+            </details>
+
+            <details class="campaign-prompt-change">
+              <summary>G0_04 · A full rewrite that reframes scoring around exhaustion and context decomposition encourages the model to consider a wider set of features, potentially improving ranking by balancing overextension signals with environmental suitability.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> rewrite</span>
+                <span><strong>Native score contract:</strong> 0 to 100, higher is better</span>
+              </div>
+              <p><strong>What changed:</strong> A full rewrite that reframes scoring around exhaustion and context decomposition encourages the model to consider a wider set of features, potentially improving ranking by balancing overextension signals with environmental suitability.</p>
+              <p><strong>Expected mechanism:</strong> Changes title, context, and scoring definitions to emphasize a two-factor framework, which may lead to more balanced and discriminating scores compared to the broad single-score definition.</p>
+              <p><strong>Expected failure:</strong> Rewriting the entire scoring section without changing the underlying data might confuse the model, resulting in less coherent scores or similar performance to the original.</p>
+              <div class="campaign-prompt-diff">
+                <div>
+                  <h3>Replaced text</h3>
+                  <pre>MEAN-REVERSION CANDIDATE SCORING
+
+CONTEXT
+Mean reversion is the tendency of stocks that have moved sharply in one
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.</pre>
+                </div>
+                <div>
+                  <h3>New text</h3>
+                  <pre>MEAN-REVERSION RANKING WITH EXHAUSTION/CONTEXT DECOMPOSITION
+
+CONTEXT
+Sharp 5-day moves often partially reverse. The quality of a reversal
+setup depends on whether the move looks exhausted (e.g., extremely
+overbought/oversold, volume climax, breadth) and whether the broader
+environment is reversal-friendly (e.g., low trend strength, high
+volatility, regime switches). This prompt decomposes scoring into
+exhaustion and context components.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.</pre>
+                </div>
+              </div>
+              <details class="campaign-full-prompt">
+                <summary>Show complete resulting prompt</summary>
+                <pre>MEAN-REVERSION RANKING WITH EXHAUSTION/CONTEXT DECOMPOSITION
+
+CONTEXT
+Sharp 5-day moves often partially reverse. The quality of a reversal
+setup depends on whether the move looks exhausted (e.g., extremely
+overbought/oversold, volume climax, breadth) and whether the broader
+environment is reversal-friendly (e.g., low trend strength, high
+volatility, regime switches). This prompt decomposes scoring into
+exhaustion and context components.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.
+
+TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61}]
+}</pre>
+              </details>
+            </details>
+
+            <details class="campaign-prompt-change">
+              <summary>G0_05 · Adding a signal_strength field injects meta-cognitive pressure, making the model calibrate its confidence and potentially yielding more stable rankings when signal_strength is used as a secondary filter or weighting.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> additive</span>
+                <span><strong>Native score contract:</strong> 0 to 100, higher is better</span>
+              </div>
+              <p><strong>What changed:</strong> Adding a signal_strength field injects meta-cognitive pressure, making the model calibrate its confidence and potentially yielding more stable rankings when signal_strength is used as a secondary filter or weighting.</p>
+              <p><strong>Expected mechanism:</strong> Requires the model to output a confidence measure alongside the score, which may indirectly improve score quality by forcing introspection on feature reliability.</p>
+              <p><strong>Expected failure:</strong> The extra output may distract the model from accurate scoring or lead to trivial signal_strength values that do not enhance cross-sectional ranking.</p>
+              <div class="campaign-prompt-diff">
+                <div>
+                  <h3>Replaced text</h3>
+                  <pre>OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61}]
+}</pre>
+                </div>
+                <div>
+                  <h3>New text</h3>
+                  <pre>OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72, &quot;signal_strength&quot;: 0.35}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58, &quot;signal_strength&quot;: 0.22}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84, &quot;signal_strength&quot;: 0.41}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61, &quot;signal_strength&quot;: 0.19}]
+}
+Where signal_strength is a 0-1 value indicating confidence/conviction in the score, with 1 being highest.</pre>
+                </div>
+              </div>
+              <details class="campaign-full-prompt">
+                <summary>Show complete resulting prompt</summary>
+                <pre>MEAN-REVERSION CANDIDATE SCORING
+
+CONTEXT
+Mean reversion is the tendency of stocks that have moved sharply in one
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.
+
+TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72, &quot;signal_strength&quot;: 0.35}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58, &quot;signal_strength&quot;: 0.22}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84, &quot;signal_strength&quot;: 0.41}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61, &quot;signal_strength&quot;: 0.19}]
+}
+Where signal_strength is a 0-1 value indicating confidence/conviction in the score, with 1 being highest.</pre>
+              </details>
+            </details>
+
+            <details class="campaign-prompt-change">
+              <summary>G0_06 · Reformulating to risk-adjusted return potential explicitly forces the model to balance reversal signals against continuation risk, which may yield more robust scores that avoid fading strong trends.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> rewrite</span>
+                <span><strong>Native score contract:</strong> 0 to 100, higher is better</span>
+              </div>
+              <p><strong>What changed:</strong> Reformulating to risk-adjusted return potential explicitly forces the model to balance reversal signals against continuation risk, which may yield more robust scores that avoid fading strong trends.</p>
+              <p><strong>Expected mechanism:</strong> Restructures the task description to introduce explicit risk adjustment, using features like ADX and regime to temper scores, potentially reducing false positives in trending markets.</p>
+              <p><strong>Expected failure:</strong> Risk adjustment might over-penalize genuine reversal candidates in strongly trending regimes, causing the model to produce compressed or uninformative scores.</p>
+              <div class="campaign-prompt-diff">
+                <div>
+                  <h3>Replaced text</h3>
+                  <pre>TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)</pre>
+                </div>
+                <div>
+                  <h3>New text</h3>
+                  <pre>TASK
+Score each ticker in the LONG and SHORT pools on its risk-adjusted return potential over the next 5 trading days, considering both reversal tendency and downside protection.
+
+LONG POOL: Assign a score (0-100) where 100 indicates highest expected risk-adjusted bounce (high exhaustion + low risk of continued decline), and 0 the lowest.
+SHORT POOL: Assign a score (0-100) where 100 indicates highest expected risk-adjusted fade (high exhaustion + low risk of continued rally), and 0 the lowest.
+
+Risk-adjusted means penalizing setups where the reversal might be weak or where momentum could continue, as indicated by ADX, VolPctl, and regime.</pre>
+                </div>
+              </div>
+              <details class="campaign-full-prompt">
+                <summary>Show complete resulting prompt</summary>
+                <pre>MEAN-REVERSION CANDIDATE SCORING
+
+CONTEXT
+Mean reversion is the tendency of stocks that have moved sharply in one
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock&#x27;s trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.
+
+TASK
+Score each ticker in the LONG and SHORT pools on its risk-adjusted return potential over the next 5 trading days, considering both reversal tendency and downside protection.
+
+LONG POOL: Assign a score (0-100) where 100 indicates highest expected risk-adjusted bounce (high exhaustion + low risk of continued decline), and 0 the lowest.
+SHORT POOL: Assign a score (0-100) where 100 indicates highest expected risk-adjusted fade (high exhaustion + low risk of continued rally), and 0 the lowest.
+
+Risk-adjusted means penalizing setups where the reversal might be weak or where momentum could continue, as indicated by ADX, VolPctl, and regime.
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  &quot;long_scores&quot;:  [{&quot;ticker&quot;: &quot;SEC_0001&quot;, &quot;score&quot;: 72}, {&quot;ticker&quot;: &quot;SEC_0002&quot;, &quot;score&quot;: 58}],
+  &quot;short_scores&quot;: [{&quot;ticker&quot;: &quot;SEC_0061&quot;, &quot;score&quot;: 84}, {&quot;ticker&quot;: &quot;SEC_0062&quot;, &quot;score&quot;: 61}]
+}</pre>
+              </details>
+            </details>
+
+      <h3>Sanitized Rejected Proposals</h3>
+      <p>These ideas were proposed but blocked by a static rule before any backtest.</p>
+
+            <details class="campaign-prompt-change campaign-rejected-prompt">
+              <summary>rejected-dfeca0f70bdb · Merging long and short scoring into a single joined instruction and output reduces redundancy, prevents the model from forgetting one side during separate reasoning passes, and forces symmetric calibration against the same internal reference distribution.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Time:</strong> 2026-08-08 01:03</span>
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> rewrite</span>
+              </div>
+              <p><strong>Rejected because:</strong> anonymize_tickers must be a JSON boolean</p>
+              <p><strong>Expected mechanism:</strong> By presenting all candidates together with a &#x27;side&#x27; tag, the model implicitly builds a single cross-sectional ranking per side. The unified score range encourages consistent scaling between long and short scores, reducing asymmetry biases.</p>
+              <p><strong>Expected failure:</strong> If the number of candidates is large, a single prompt may exceed token limits or cause the model to truncate output. Also, without explicit side-separated instructions, the model might accidentally pool long and short candidate scores onto a single distribution, diluting relative ranking within each side.</p>
+              <div class="campaign-prompt-diff">
+                <div><h3>Proposed replaced text</h3><pre>TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre></div>
+                <div><h3>Proposed new text</h3><pre>TASK
+You are scoring a single unified pool of stocks selected for mean-reversion.
+Each ticker has already been classified as a LONG or SHORT candidate based on
+its recent 5-day extreme move, and its assigned side is provided in the input.
+
+LONG candidates are the biggest 5-day losers; SHORT candidates are the biggest
+5-day winners.
+
+For each ticker, output a single SCORE (0-100) that reflects the strength of
+the mean-reversion setup relative to all other candidates on the SAME side.
+
+SCORE interpretation:
+  100 = strongest reversion setup (most extreme move, clearest exhaustion,
+        highest conviction reversal) within its side.
+   50 = average candidate on the same side.
+    0 = weakest reversion setup on the same side.
+
+RULES
+- Score every ticker from both sides in a single run. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it.
+  Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre></div>
+              </div>
+            </details>
+
+            <details class="campaign-prompt-change campaign-rejected-prompt">
+              <summary>rejected-913c4f59fdf2 · Explicitly decoupling long and short scoring distributions with a concise, side-agnostic scale reduces cognitive load and prevents the model from cross-contaminating relative rankings between pools when constructing internal score distributions.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Time:</strong> 2026-08-08 01:03</span>
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> rewrite</span>
+              </div>
+              <p><strong>Rejected because:</strong> anonymize_tickers must be a JSON boolean</p>
+              <p><strong>Expected mechanism:</strong> The model no longer needs to map &#x27;oversold exhaustion&#x27; and &#x27;overbought exhaustion&#x27; to separate semantics; it simply ranks candidates within their side based on the supplied features. This simplifies its scoring heuristic to a pure relative ordering task.</p>
+              <p><strong>Expected failure:</strong> It may inadvertently encourage the model to assign similar score distributions to both sides even if one side shows greater signal dispersion, leading to compressed scores where differentiation is unwarranted.</p>
+              <div class="campaign-prompt-diff">
+                <div><h3>Proposed replaced text</h3><pre>For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)</pre></div>
+                <div><h3>Proposed new text</h3><pre>For each ticker, output a single SCORE (0-100) relative to all other candidates on the SAME side:
+
+  SCORE 100 = top-ranked mean-reversion setup on its side (most extreme move,
+              strongest exhaustion signals).
+  SCORE 50  = typical candidate on its side.
+  SCORE 0   = weakest setup on its side.
+
+IMPORTANT: Scores for LONG and SHORT pools are computed independently.
+A score of 80 on a long candidate does not imply it is better than a
+short candidate with score 60. Each side is ranked in isolation.</pre></div>
+              </div>
+            </details>
+
+            <details class="campaign-prompt-change campaign-rejected-prompt">
+              <summary>rejected-96b87a954fd4 · Forcing the model to compute scores as a pure, deterministic monotonic function of Trail5 eliminates complexity and variance from ad-hoc heuristics, serving as a tight lower-bound benchmark for any more sophisticated scoring system.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Time:</strong> 2026-08-08 01:03</span>
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> rewrite</span>
+              </div>
+              <p><strong>Rejected because:</strong> anonymize_tickers must be a JSON boolean</p>
+              <p><strong>Expected mechanism:</strong> By reducing the task to computing percentile rank of Trail5 and inverting for the long side, the model&#x27;s output becomes fully deterministic and perfectly correlated with the magnitude of the recent move, isolating the contribution of additional features.</p>
+              <p><strong>Expected failure:</strong> The model may misinterpret &#x27;percentile rank&#x27; or fail to compute it correctly in a zero-shot setting, leading to noisy or non-monotonic scores. Additionally, using only Trail5 ignores exhaustion signals that could distinguish mean reversion from momentum continuation.</p>
+              <div class="campaign-prompt-diff">
+                <div><h3>Proposed replaced text</h3><pre>TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre></div>
+                <div><h3>Proposed new text</h3><pre>TASK
+For each ticker, assign a SCORE from 0 to 100 based on the ranking of the
+trailing 5-day return (Trail5) within its side. Lower Trail5 is more
+oversold (stronger long reversion candidate); higher Trail5 is more
+overbought (stronger short reversion candidate).
+
+LONG CANDIDATES: Use Trail5 percentile rank, inverted (i.e., more negative
+Trail5 → higher score).
+
+SHORT CANDIDATES: Use Trail5 percentile rank directly (higher positive
+Trail5 → higher score).
+
+Linearly scale percentile ranks to 0-100, preserving monotonicity and
+the full range of the input cross-section.
+
+RULES
+- Score every ticker. Do not skip any.
+- Compute percentile rank strictly within each side.
+- Do not adjust scores using any other feature.
+- Treat tickers as opaque identifiers.
+- Output only the scores.</pre></div>
+              </div>
+            </details>
+
+            <details class="campaign-prompt-change campaign-rejected-prompt">
+              <summary>rejected-0a9cfd667771 · Adding explicit, interpretable scoring guidelines based on well-established reversal heuristics (low ADX, momentum divergence, volume/volatility regime) provides the model with a structured reasoning framework, reducing reliance on opaque generalizations and improving ranking consistency.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Time:</strong> 2026-08-08 01:03</span>
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> additive</span>
+              </div>
+              <p><strong>Rejected because:</strong> anonymize_tickers must be a JSON boolean</p>
+              <p><strong>Expected mechanism:</strong> The guidelines steer the model toward a transparent formula: score ∝ extreme move × (low trend) × (mean-reversion regime). This should enhance differentiation between genuine reversal candidates and those likely to continue trending.</p>
+              <p><strong>Expected failure:</strong> The guidelines may inadvertently double-count Trail5 effects already captured by cross-sectional percentile ranks, leading to overemphasis on move magnitude. Also, if the model rigidly applies rules without nuance, it could misclassify complex multi-factor interactions.</p>
+              <div class="campaign-prompt-diff">
+                <div><h3>Proposed replaced text</h3><pre>RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre></div>
+                <div><h3>Proposed new text</h3><pre>RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it.
+  Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+Exhaustion Scoring Guidelines (apply within each pool independently):
+- Favor candidates with extreme Trail5 moves that are NOT accompanied by
+  trending behavior: prefer low ADX, low Mom3m momentum continuation,
+  and RSI5 near extremes (low for long, high for short).
+- Penalize extreme moves that coincide with high trend strength or strong
+  momentum in the same direction, as they suggest continuation, not reversion.
+- Use VolPctl to gauge regime: higher VolPctl increases the likelihood of
+  noise-driven moves that reverse; lower VolPctl favors sustained trends.
+- Adjust scores smoothly: small differences in indicators should produce
+  small score differences; avoid cliff effects.</pre></div>
+              </div>
+            </details>
+
+            <details class="campaign-prompt-change campaign-rejected-prompt">
+              <summary>rejected-a5893633e23b · Prescribing an explicit, weighted linear combination of normalized features removes reliance on the model&#x27;s internal heuristics and enforces a transparent, reproducible scoring function that can be directly validated against historical outcomes.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Time:</strong> 2026-08-08 01:03</span>
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> rewrite</span>
+              </div>
+              <p><strong>Rejected because:</strong> anonymize_tickers must be a JSON boolean</p>
+              <p><strong>Expected mechanism:</strong> The fixed formula forces the model to compute scores as a known blend of exhaustion and extreme-move features, making its decision process auditable and potentially more robust to distributional shifts in the input data.</p>
+              <p><strong>Expected failure:</strong> The model may struggle to accurately perform normalization and linear combination in a zero-shot text generation setting, leading to calculation errors or arbitrary outputs. Additionally, the chosen weights may be suboptimal compared to an adaptive, context-sensitive model.</p>
+              <div class="campaign-prompt-diff">
+                <div><h3>Proposed replaced text</h3><pre>TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre></div>
+                <div><h3>Proposed new text</h3><pre>TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days. For each ticker, compute a reversion score
+by estimating how its recent extreme move aligns with typical reversal
+patterns.
+
+LONG POOL: Extreme 5-day losers. High score → oversold bounce likely.
+SHORT POOL: Extreme 5-day gainers. High score → overbought fade likely.
+
+Step-by-step scoring method (apply to each ticker independently):
+1. Normalize each feature within its pool to a 0-1 scale.
+2. Combine normalized features using prescribed signed coefficients:
+   LONG_SCORE = 0.30 * (1 - MRL_norm)      // extreme loser rank
+              + 0.20 * (1 - RSI5_norm)     // oversold
+              + 0.15 * (1 - Rng55_norm)    // near low of range
+              + 0.10 * Vel_norm            // high velocity (panic)
+              + 0.10 * (1 - ADX_norm)      // low trend
+              + 0.05 * VolPctl_norm        // high volatility regime
+              + 0.05 * (1 - Mom3m_norm)    // weak momentum
+              + 0.05 * (1 - AutoC_norm)    // negative autocorrelation
+   SHORT_SCORE = same formula with signs reversed for directional indicators.
+3. Rescale the resulting composite to the 0-100 range using min-max
+   scaling within each pool.
+
+RULES
+- Score every ticker. Do not skip any.
+- Apply the precise combination listed above; do not modify weights or features.
+- Treat tickers as opaque identifiers.
+- Do not build portfolios, provide rationales, or commentary.</pre></div>
+              </div>
+            </details>
+
+            <details class="campaign-prompt-change campaign-rejected-prompt">
+              <summary>rejected-d08cb52b6ced · Transforming the scoring task into a pairwise ranking problem encourages the model to make fine-grained relative distinctions between candidates, potentially producing more continuous and discriminative score distributions than direct absolute scoring.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Time:</strong> 2026-08-08 01:03</span>
+                <span><strong>Generation:</strong> G0</span>
+                <span><strong>Mutation:</strong> rewrite</span>
+              </div>
+              <p><strong>Rejected because:</strong> anonymize_tickers must be a JSON boolean</p>
+              <p><strong>Expected mechanism:</strong> By evaluating each ticker against all others on the same side and aggregating wins, the model implicitly constructs a robust ranking that is insensitive to scale differences in indicators and can capture non-linear interactions.</p>
+              <p><strong>Expected failure:</strong> The model may be unable to hold all pairwise comparisons in memory without explicit enumeration, leading to incomplete or inconsistent rankings. Also, if the pool size is large, the cognitive load could degrade consistency, especially near the median where win counts are similar.</p>
+              <div class="campaign-prompt-diff">
+                <div><h3>Proposed replaced text</h3><pre>TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.</pre></div>
+                <div><h3>Proposed new text</h3><pre>TASK
+Within each pool, you are given a list of tickers with associated indicators.
+Your job is to assign a score (0-100) that represents the relative strength
+of the mean-reversion signal. Use a pairwise comparison approach:
+
+For every pair of tickers on the same side, determine which is the stronger
+reversion candidate based on a holistic assessment of the provided features.
+Count the number of wins for each ticker; the score is linearly mapped from
+the win count to the 0-100 range (most wins = 100, least wins = 0).
+
+RULES
+- Score every ticker. Do not skip any.
+- Perform the pairwise comparisons mentally and consistently.
+- Use only the provided indicator columns. No outside knowledge.
+- Treat tickers as opaque identifiers.
+- Output only the scores.</pre></div>
+              </div>
+            </details>
+
+            <details class="campaign-prompt-change campaign-rejected-prompt">
+              <summary>rejected-742d08186c9f · Explicitly operationalizing the exhaustion/context decomposition and percentile-ranking within each pool will improve consistency on the long side while preserving the promising short-side behavior, by providing clearer guidance on score construction.</summary>
+              <div class="campaign-prompt-meta">
+                <span><strong>Time:</strong> 2026-08-08 15:40</span>
+                <span><strong>Generation:</strong> G1</span>
+                <span><strong>Mutation:</strong> substitutive</span>
+              </div>
+              <p><strong>Rejected because:</strong> Every candidate must contain one replace_once patch</p>
+              <p><strong>Expected mechanism:</strong> The parent G0_04 already introduced exhaustion/context language but left scoring ambiguous. This mutation operationalizes it: define how to compute Exhaustion and Context from specific features, combine linearly, then percentile-rank within pool. This reduces model variance and ensures 0-100 scores are fully utilized without artificial separation.</p>
+              <p><strong>Expected failure:</strong> Short-side degradation may persist if exhaustion signals for overbought conditions are less reliably captured by RSI5 and Rng55 alone; ADX and VolPctl may not sufficiently differentiate fade setups. The percentile ranking could compress scores if raw scores cluster.</p>
+              <div class="campaign-prompt-diff">
+                <div><h3>Proposed replaced text</h3><pre></pre></div>
+                <div><h3>Proposed new text</h3><pre></pre></div>
+              </div>
+            </details>
+
+    </section>
+
+    <section id="failures">
+      <h2>What Interrupted the Campaign</h2>
+      <p>Only failures and retries are shown here. The campaign stops after three consecutive provider or runner failures.</p>
+      <div class="table-wrap"><p class="muted">No rows available.</p></div>
+    </section>
+  </main>
+</body>
+</html>

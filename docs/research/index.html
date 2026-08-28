@@ -1,0 +1,290 @@
+<!--
+  Purpose: Publish a self-contained page from the mean-reversion LLM research
+  dashboard suite. Regenerate with scripts/export_research_site.py.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mean-Reversion Research Hub</title>
+  <style>
+
+    :root {
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --ink: #17222d;
+      --muted: #687589;
+      --line: #d8e0e8;
+      --head: #edf2f6;
+      --accent: #247665;
+      --accent-soft: #edf8f5;
+      --warn-soft: #fff7e8;
+      --shadow: 0 14px 34px rgba(22, 33, 44, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px; }
+    a { color: inherit; }
+    h1 { margin: 0 0 8px; font-size: clamp(30px, 4vw, 46px); line-height: 1.05; letter-spacing: 0; }
+    h2 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 0 0 8px; font-size: 17px; letter-spacing: 0; }
+    p { margin: 0 0 10px; color: var(--muted); }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 22px;
+    }
+    .brand { font-weight: 900; color: #203129; }
+    .nav { display: flex; flex-wrap: wrap; gap: 8px; }
+    .nav a {
+      text-decoration: none;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 13px;
+      font-weight: 800;
+      color: #2a3b34;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(280px, .8fr);
+      gap: 18px;
+      align-items: stretch;
+      margin-bottom: 18px;
+    }
+    .hero-card, section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+    .eyebrow {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .lead { color: #334252; font-size: 18px; max-width: 850px; }
+    .summary-list {
+      margin: 12px 0 0;
+      padding-left: 18px;
+      color: #334252;
+      font-weight: 650;
+    }
+    .summary-list li { margin: 8px 0; }
+    section { margin-bottom: 18px; }
+    .callout {
+      background: var(--accent-soft);
+      border-left: 5px solid var(--accent);
+      color: #244d44;
+      padding: 13px 14px;
+      margin: 14px 0;
+      font-weight: 750;
+    }
+    .warning { background: var(--warn-soft); border-left-color: #b5812d; color: #6f4b00; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      margin-top: 12px;
+    }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    th {
+      text-align: left;
+      background: var(--head);
+      color: #263647;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      white-space: nowrap;
+    }
+    th, td { padding: 10px 11px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tbody tr:nth-child(even) { background: #fafcfd; }
+    @media (max-width: 860px) {
+      main { padding: 18px; }
+      .topbar, .hero { display: block; }
+      .nav { margin-top: 12px; }
+      .hero-card { margin-bottom: 14px; }
+    }
+
+    .hub-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(260px, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .hub-card {
+      display: block;
+      min-height: 210px;
+      text-decoration: none;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+    .hub-card:hover { border-color: #9fc9bd; transform: translateY(-1px); }
+    .hub-card .label {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 10px;
+    }
+    .hub-card h2 { margin-bottom: 10px; }
+    .next-link {
+      margin-top: 18px;
+      color: var(--accent);
+      font-weight: 900;
+    }
+    .synthesis {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(260px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .synthesis article {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 16px;
+    }
+    .synthesis strong { color: var(--ink); }
+    @media (max-width: 860px) {
+      .hub-grid, .synthesis { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <div class="brand">RQA Mean Reversion Research Suite</div>
+      <nav class="nav">
+        <a href="prompt-engineering.html">Prompt Dashboard</a>
+        <a href="autoresearch.html">Autoresearch</a>
+        <a href="future-experiments.html">Future Experiments</a>
+        <a href="out-of-sample.html">Out-of-Sample Testing</a>
+        <a href="latest-campaign.html">Latest Campaign</a>
+        <a href="#prompt-interaction">A/B/C/D Update</a>
+      </nav>
+    </div>
+
+    <div class="hero">
+      <section class="hero-card">
+        <div class="eyebrow">Research hub</div>
+        <h1>Mean-Reversion LLM Research, Split Into Readable Pages</h1>
+        <p class="lead">This is the front door. The prompt dashboard explains how the LLM is asked to think, the autoresearch page shows zero-token cache experiments, and the future page lays out the next testable layers.</p>
+        <div class="callout">Current synthesis: Trail5 is excellent for building the reversal pool, while the LLM is most interesting as an ordinal selector and risk-aware exception layer inside that pool.</div>
+        <p class="muted">Generated 2026-08-23 18:06:12.</p>
+      </section>
+    </div>
+
+    <div class="hub-grid">
+      <a class="hub-card" href="prompt-engineering.html">
+        <div class="label">Prompt/process</div>
+        <h2>Prompt Engineering Dashboard</h2>
+        <p>Legacy vs V2 prompt map, prompt A/Bs, cache forensics, reasoning peeks, and manager-readable purpose notes for each experiment.</p>
+        <div class="next-link">Open prompt dashboard</div>
+      </a>
+      <a class="hub-card" href="autoresearch.html">
+        <div class="label">Zero-token evidence</div>
+        <h2>Autoresearch Cache Sweep</h2>
+        <p>Offline replay experiments from existing caches: rank weighting, visible vs anonymized agreement, disagreement tests, placebo, walk-forward, and regime cuts.</p>
+        <div class="next-link">Open autoresearch</div>
+      </a>
+      <a class="hub-card" href="future-experiments.html">
+        <div class="label">Next research</div>
+        <h2>Future Experiments</h2>
+        <p>Sequential specialized-view roadmap: anonymous ranker, visible critic, regime allocator, adversarial veto, short-side roles, and factorial model tests.</p>
+        <div class="next-link">Open future plan</div>
+      </a>
+      <a class="hub-card" href="out-of-sample.html">
+        <div class="label">Out-of-sample evidence</div>
+        <h2>2015–2019 Out-of-Sample Testing</h2>
+        <p>Tracks development evidence, locked validation, final holdout status, exploratory robustness, and individual experiments including the glossary ablation.</p>
+        <div class="next-link">Open out-of-sample testing</div>
+      </a>
+
+      <a class="hub-card" href="latest-campaign.html">
+        <div class="label">Live autoresearch</div>
+        <h2>prompt_search_ticker_optional_20260807</h2>
+        <p>Read-only supervisor status, candidate lineage, completed gross metrics, budgets, failures, and validation state.</p>
+        <p><strong>Status:</strong> awaiting_validation_approval · <strong>Phase:</strong> approval</p>
+        <div class="next-link">Open latest campaign</div>
+      </a>
+
+    </div>
+
+    <section id="prompt-interaction">
+      <div class="section-heading">
+        <div>
+          <div class="section-label">Latest development evidence</div>
+          <h2>Shared-Control Prompt Interaction: A / B / C / D</h2>
+          <p>This is the latest prompt work folded into the main research record. It is development-only; the blind period remains untouched.</p>
+        </div>
+      </div>
+      <div class="callout"><strong>Correct control design:</strong> A was collected once alongside B, frozen, and reused unchanged for C and D. C and D did not receive fresh controls.</div>
+      <div class="table-wrap"><table class="wide-table"><thead><tr><th>Arm</th><th>Status</th><th>Decision</th><th>Annualized lift vs A</th><th>95% paired CI</th><th>P(lift &gt; 0)</th><th>Block stability</th><th>Best-5%-trimmed lift</th><th>Long lift</th><th>Short lift</th></tr></thead><tbody><tr><td>B</td><td>Complete · 251/251</td><td>RETAIN — development candidate</td><td>+1.71%</td><td>-1.49% to +4.98%</td><td>84.64%</td><td>75.0%</td><td>-1.60%</td><td>-0.40%</td><td>+2.11%</td></tr><tr><td>C</td><td>Complete · 251/251</td><td>REJECT</td><td>-0.90%</td><td>-4.24% to +2.28%</td><td>29.96%</td><td>25.0%</td><td>-3.88%</td><td>-0.58%</td><td>-0.31%</td></tr><tr><td>D</td><td>Incomplete · 137/251</td><td>PRUNE — interaction futility; not a statistical rejection</td><td>Not computed</td><td>Not computed</td><td>Not computed</td><td>Not computed</td><td>Not computed</td><td>Not computed</td><td>Not computed</td></tr></tbody></table></div>
+      <div class="synthesis">
+        <article>
+          <h3>A — Shared Control</h3>
+          <p>Capital-normalized results: <strong>12.66% CAGR</strong>, <strong>1.094 Sharpe</strong>, and <strong>-8.76% maximum drawdown</strong>.</p>
+        </article>
+        <article>
+          <h3>B — De-prescribed Context</h3>
+          <p><strong>14.54% CAGR, 1.195 Sharpe, -8.40% drawdown.</strong> The +1.71-point lift came primarily from a <strong>+2.11-point short-side improvement</strong>; longs declined 0.40 points. Retain for its mechanism, not headline CAGR alone. Its CI crosses zero and trimmed lift is negative, so it is not validated.</p>
+        </article>
+        <article>
+          <h3>C — Proportional Separation</h3>
+          <p><strong>11.64% CAGR, 1.002 Sharpe, -10.37% drawdown.</strong> It lost 0.90 points versus A, hurt both sides, achieved only 25% chronological-block stability, and is rejected.</p>
+        </article>
+        <article>
+          <h3>D — B × C Interaction</h3>
+          <p>D combined B's neutral context with: <strong>“Use the full 0–100 range. Two tickers that differ on a signal must receive distinct scores proportional to the signal's magnitude.”</strong></p>
+          <p>It cached <strong>137/251 dates</strong> through 2011-09-16 using 142 calls and 250,275 output tokens, then stopped on DeepSeek 402. No D return series was produced, so no CAGR or lift is claimed. Prune as an incomplete interaction-futility decision—not a statistical rejection—and preserve the cache.</p>
+        </article>
+      </div>
+      <div class="callout">Selection remains robustness- and mechanism-aware: short lift, long-side damage, stability, concentration, uncertainty, and weak-state behavior matter alongside CAGR. This preserves the earlier G0_02/G0_01 lesson that useful short-side improvement can matter even when headline CAGR is not the sole winner-selection key.</div>
+      <p><a href="prompt-interaction.html">Open the detailed thesis-package dashboard</a></p>
+    </section>
+
+    <section>
+      <h2>Executive Insights</h2>
+      <p>Short version, with the dense evidence kept behind the linked pages.</p>
+      <div class="synthesis">
+        <article>
+          <h3>Visible Model = Classifier</h3>
+          <p><strong>Ticker-visible scoring</strong> appears better at making the broad yes/no distinction: roughly deciding which half belongs in the book.</p>
+        </article>
+        <article>
+          <h3>Anonymized Model = Ranker</h3>
+          <p><strong>Anonymized scoring</strong> appears better at ordering the highest-conviction ideas once the candidate pool is already technical.</p>
+        </article>
+        <article>
+          <h3>Disagreement Is Directional</h3>
+          <p>Generic disagreement penalties are too blunt. The interesting case is when the anonymized model ranks a stock high and ticker-visible does not.</p>
+        </article>
+        <article>
+          <h3>Shorts Need A Different Job</h3>
+          <p>The short book may be more useful as avoidance or hedge construction than as pure short alpha. Test that explicitly.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

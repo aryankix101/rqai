@@ -1,5 +1,23 @@
 # Mean-Reversion LLM Research
 
+## Research Dashboards
+
+[Open the published research dashboard](https://aryankix101.github.io/rqai/)
+
+The dashboard hub provides one-click access to the prompt dashboard,
+autoresearch report, future experiments, out-of-sample testing, latest prompt
+campaign, and A/B/C/D interaction update. The tracked static site lives in
+`docs/research/`; large generated outputs and private caches remain ignored.
+
+Refresh the published copies after regenerating local dashboards:
+
+```bash
+./.venv/bin/python scripts/export_research_site.py
+```
+
+GitHub Pages deploys the bundle after it is pushed to `main`. On first use,
+select **GitHub Actions** under **Settings → Pages → Build and deployment**.
+
 ## Current Pipeline
 
 The active experiment runner is `mean_reversion_llm_v2.py`. The current lab
