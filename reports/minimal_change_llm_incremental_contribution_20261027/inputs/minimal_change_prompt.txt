@@ -1,0 +1,111 @@
+MEAN-REVERSION CANDIDATE SCORING
+
+CONTEXT
+Mean reversion is the tendency of stocks that have moved sharply in one
+direction to partially reverse over the next 5 trading days, especially
+when the move shows signs of exhaustion (extreme indicators, volume
+climax, range positioning). The strongest reversion setups combine an
+extreme recent move with exhaustion signals and a supportive regime.
+
+FEATURE GLOSSARY
+
+All values are computed using data available as of the rebalance date.
+Scale note:
+- MRL/MRS are 0-100 cross-sectional percentile scores.
+- Trail5/MRSig are shown as percent returns.
+
+Ticker
+- Security identifier. In anonymized runs, this is a synthetic SEC_#### ID.
+
+Trail5
+- Stock's trailing 5-trading-day return, in percent.
+
+MRSig
+- Mean-reversion signal, equal to negative trailing-5-day return.
+
+MRL
+- Long-side extreme-move percentile.
+- Computed as the cross-sectional percentile rank of MRSig across the valid universe.
+- Higher MRL means higher MRSig, usually a bigger recent loser.
+
+MRS
+- Short-side extreme-move percentile.
+- Computed as 100 - MRL.
+- Higher MRS usually means a bigger recent winner.
+
+RSI5
+- 5-day RSI computed from closing prices.
+
+Rng55
+- Current close location inside the trailing 55-day high-low range.
+- Approximately 0 = trailing 55-day low; approximately 1 = trailing 55-day high.
+
+Vel/V
+- Recent 10-trading-day return divided by recent 21-trading-day annualized volatility.
+
+%MA100
+- Percent distance from the 100-day moving average.
+
+52WH
+- Percent distance from trailing 52-week high.
+
+Mom3m
+- Trailing roughly 3-month return, in percent.
+
+AutoC
+- Autocorrelation of recent daily log returns at lag 5.
+- Computed as the correlation between each recent daily return and the daily return 5 trading days earlier.
+
+ADX
+- 14-day Average Directional Index, trend strength only.
+
+VolPctl
+- Current stock realized-volatility percentile over 504 trading days. Higher = stock is in a high-vol regime.
+
+Market Regime
+- normal: Mid/default volatility regime.
+- crisis: High volatility and SPY below 200-day MA.
+- squeeze: High volatility and SPY above 200-day MA.
+- grind_up: Low volatility and SPY above 200-day MA.
+- slow_bleed: Low volatility and SPY below 200-day MA.
+
+Important: MRL, MRS, MRSig, and Trail5 are mechanically linked views of the same recent 5-trading-day move, not four independent signals.
+
+TASK
+You are scoring two pools of stocks selected as mean-reversion candidates
+over the next 5 trading days.
+
+  LONG POOL  = the biggest 5-day losers in the Russell 1000 candidate universe.
+               Looking for snap-back / oversold-bounce setups.
+
+  SHORT POOL = the biggest 5-day winners in the Russell 1000 candidate universe.
+               Looking for fade / overbought-reversal setups.
+
+For each ticker in each pool, output a single SCORE (0-100):
+
+  LONG POOL:
+    100 = strongest snap-back setup (most oversold, most exhausted seller,
+          most primed for an upward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest snap-back setup (least likely to bounce despite the move)
+
+  SHORT POOL:
+    100 = strongest fade setup (most overbought, most exhausted buyer,
+          most primed for a downward reversion over the next 5 trading days)
+    50  = average candidate in this pool
+    0   = weakest fade setup (least likely to reverse despite the move)
+
+RULES
+- Score every ticker in both pools. Do not skip any.
+- Use the 0-100 range only when the supplied cross-section supports it. Do not manufacture separation.
+- Use only the indicator columns provided. No outside knowledge, no
+  calendar awareness, no ticker familiarity.
+- Treat tickers as opaque identifiers.
+- Do not pick top names, build a portfolio, assign weights, write
+  rationales, or provide commentary of any kind.
+
+OUTPUT FORMAT (STRICT JSON, no other text, no markdown fences):
+{
+  "long_scores":  [{"ticker": "SEC_0001", "score": 72}, {"ticker": "SEC_0002", "score": 58}],
+  "short_scores": [{"ticker": "SEC_0061", "score": 84}, {"ticker": "SEC_0062", "score": 61}]
+}

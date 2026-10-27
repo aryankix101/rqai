@@ -1,0 +1,102 @@
+{
+  "backend_revision_recorded": false,
+  "bootstrap": {
+    "block_size_weeks": 4,
+    "n_boot": 5000,
+    "replica_mean_ci_resamples_scoring_runs": true
+  },
+  "common_baseline_evaluation_dates": 199,
+  "configuration": {
+    "anchor_offsets": [
+      3
+    ],
+    "anonymize_tickers": true,
+    "book_sizes": [
+      30
+    ],
+    "cost_bps_levels": [
+      0.0
+    ],
+    "llm_max_attempts": 2,
+    "llm_max_output_tokens": 16000,
+    "llm_pool_size": 60,
+    "model": "deepseek-v4-flash",
+    "output_contract": "score_0_100",
+    "pool_sizes": [
+      60
+    ],
+    "prompt_hash": "5300b8966c29",
+    "prompt_source": "mean_reversion_llm_v2.V2_MINIMAL_CHANGE_CONTROL_PROMPT",
+    "prompt_variant": "v2-minimal-change-control",
+    "prompt_version": "llm_reversal_signal_v2_minimal_change_control_5300b8966c29",
+    "schedule": "anchors",
+    "temperature": 1.0,
+    "thinking_call_policy": "split-side",
+    "thinking_mode": "disabled"
+  },
+  "full_replica_dates": 251,
+  "portfolio_construction": {
+    "candidate_pool_per_side": 60,
+    "concentrated_shorts": false,
+    "long_short_capital_split": {
+      "long": 0.5,
+      "short": 0.5
+    },
+    "score_proportional_weighting": false,
+    "selected_per_side": 30,
+    "ticker_visibility": "anonymized_SEC_identifiers",
+    "within_side_weighting": "equal"
+  },
+  "replica_average": {
+    "annualized_lift_pp_per_year": -0.1807705151002909,
+    "between_replica_sd_pp_per_year": 1.276286999241959,
+    "ci95_high_pp_per_year": 2.4580971917644185,
+    "ci95_low_pp_per_year": -2.8836600438489737,
+    "individual_lifts_pp_per_year": [
+      0.7609818572155435,
+      0.3300535362696066,
+      -1.6333469387860229
+    ]
+  },
+  "replica_count": 3,
+  "replicas": {
+    "replica_1": {
+      "annual_lift_pp_per_year": 3.1574069350336784,
+      "best_5pct_dates_share_of_net_lift_pct": 119.75027586117508,
+      "ci95_high_pp_per_year": 6.6935093191565604,
+      "ci95_low_pp_per_year": -0.31152371357519737,
+      "lift_after_removing_best_5pct_dates_pp_per_year": -0.6576585777814482,
+      "n_dates": 251,
+      "positive_week_fraction_pct": 48.20717131474104,
+      "probability_lift_gt_zero": 0.9642
+    },
+    "replica_2": {
+      "annual_lift_pp_per_year": 0.3666552528887801,
+      "best_5pct_dates_share_of_net_lift_pct": 779.53384351576,
+      "ci95_high_pp_per_year": 3.053271226890772,
+      "ci95_low_pp_per_year": -2.4076448176945418,
+      "lift_after_removing_best_5pct_dates_pp_per_year": -2.6276394102281344,
+      "n_dates": 251,
+      "positive_week_fraction_pct": 43.82470119521912,
+      "probability_lift_gt_zero": 0.608
+    },
+    "replica_3": {
+      "annual_lift_pp_per_year": 1.2991906958730004,
+      "best_5pct_dates_share_of_net_lift_pct": 213.18188579025298,
+      "ci95_high_pp_per_year": 4.458154354637002,
+      "ci95_low_pp_per_year": -1.7919510145837796,
+      "lift_after_removing_best_5pct_dates_pp_per_year": -1.5507671467636277,
+      "n_dates": 251,
+      "positive_week_fraction_pct": 49.00398406374502,
+      "probability_lift_gt_zero": 0.779
+    }
+  },
+  "return_lift_unit": "annualized arithmetic capital return percentage points",
+  "simple_baselines": [
+    "Trail5 + RSI5, equal within-side percentile ranks",
+    "Trail5 + RSI5 + Rng55, equal within-side percentile ranks"
+  ],
+  "tabular_all_training_strictly_past": true,
+  "tabular_panel_verified_exact": true,
+  "tabular_source": "backtest_results/research_thesis_package_20260808/same_information_tabular/walk_forward_predictions.csv"
+}

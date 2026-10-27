@@ -1,0 +1,7 @@
+{
+  "replica_1": "backtest_results/v2_prompt_ab_2009_2014/minimal_change_temp1",
+  "replica_2": "backtest_results/v2_minimal_change_temp1_v4flash0731_second_2009_2014",
+  "replica_3": "backtest_results/v2_minimal_change_temp1_replica3_20261027",
+  "matched_trail5": "backtest_results/v2_prompt_ab_2009_2014/minimal_change_temp1/pool60_pos30/anchor_3/baseline_pool",
+  "tabular_baselines": "backtest_results/research_thesis_package_20260808/same_information_tabular"
+}
